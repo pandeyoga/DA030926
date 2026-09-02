@@ -319,12 +319,122 @@ async def unmatch_transaction(session_id: str, request: Request):
     db = get_db()
     body = await request.json()
     txn_id = body.get("txn_id")
+    txn = await db.bank_recon_txns.find_one({"id": txn_id, "session_id": session_id}, {"_id": 0})
+    if txn and txn.get("match_type") == "settlement" and txn.get("match_id"):
+        # Tautan dua arah: pencairan juga harus melepas rujukan ke mutasi ini.
+        await db.marketing_settlements.update_one(
+            {"id": txn["match_id"], "bank_txn_id": txn_id},
+            {"$set": {"bank_txn_id": None, "bank_session_id": None, "bank_txn_date": None,
+                      "bank_linked_at": None}})
     await db.bank_recon_txns.update_one(
         {"id": txn_id, "session_id": session_id},
-        {"$set": {"is_matched": False, "match_id": None, "match_ref": None, "matched_at": None}}
+        {"$set": {"is_matched": False, "match_id": None, "match_ref": None, "match_type": None,
+                  "matched_at": None}}
     )
     await _recalculate_session(db, session_id)
     return {"ok": True}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TAUTAN MUTASI BANK ↔ PENCAIRAN MARKETPLACE (F9)
+# ═══════════════════════════════════════════════════════════════════
+# Kenapa pintu ini ada: `net_payout` pencairan DIISI dari mutasi bank. Selama
+# keduanya hidup di dua layar tanpa tautan, tidak ada yang bisa membuktikan
+# bahwa angka yang diketik staf memang angka yang masuk rekening.
+
+SETTLEMENT_AMOUNT_TOLERANCE = 1.0   # rupiah — pembulatan, bukan potongan tak dikenal
+
+
+def _days_between(a: str, b: str) -> Optional[int]:
+    try:
+        return abs((date.fromisoformat(a[:10]) - date.fromisoformat(b[:10])).days)
+    except (ValueError, TypeError):
+        return None
+
+
+@router.get("/sessions/{session_id}/transactions/{txn_id}/settlement-candidates")
+async def settlement_candidates(session_id: str, txn_id: str, request: Request):
+    """Pencairan yang MUNGKIN cocok dengan satu baris mutasi — diurutkan: nominal sama
+    persis → tanggal terdekat. Pencairan yang sudah tertaut ke mutasi lain disembunyikan."""
+    await require_auth(request)
+    db = get_db()
+    txn = await db.bank_recon_txns.find_one({"id": txn_id, "session_id": session_id}, {"_id": 0})
+    if not txn:
+        raise HTTPException(404, "Transaksi tidak ditemukan.")
+    amount = float(txn.get("amount") or 0)
+    rows = await db.marketing_settlements.find(
+        {"$or": [{"bank_txn_id": None}, {"bank_txn_id": {"$exists": False}}, {"bank_txn_id": txn_id}]},
+        {"_id": 0, "id": 1, "settlement_id": 1, "settlement_date": 1, "net_payout": 1,
+         "gross_sales": 1, "platform": 1, "account_id": 1, "je_number": 1, "je_status": 1,
+         "math_verified": 1, "bank_txn_id": 1}).to_list(2000)
+    acc_ids = list({r.get("account_id") for r in rows if r.get("account_id")})
+    accounts = {a["id"]: a.get("account_name") for a in await db.marketing_platform_accounts.find(
+        {"id": {"$in": acc_ids}}, {"_id": 0, "id": 1, "account_name": 1}).to_list(500)}
+    out = []
+    for r in rows:
+        diff = round(float(r.get("net_payout") or 0) - amount, 2)
+        days = _days_between(r.get("settlement_date") or "", txn.get("txn_date") or "")
+        out.append({**r, "account_name": accounts.get(r.get("account_id")) or r.get("account_id"),
+                    "amount_diff": diff, "amount_match": abs(diff) <= SETTLEMENT_AMOUNT_TOLERANCE,
+                    "days_apart": days, "linked_here": r.get("bank_txn_id") == txn_id})
+    out.sort(key=lambda x: (not x["amount_match"], x["days_apart"] if x["days_apart"] is not None else 9999,
+                            abs(x["amount_diff"])))
+    return {"ok": True, "txn": txn, "items": out[:15],
+            "exact_count": sum(1 for o in out if o["amount_match"])}
+
+
+@router.post("/sessions/{session_id}/link-settlement")
+async def link_settlement(session_id: str, request: Request):
+    """Tautkan satu baris mutasi ke satu pencairan marketplace. Body: {txn_id, settlement_doc_id}.
+
+    Ditolak bila nominal berbeda: mutasi bank adalah SUMBER `net_payout`, jadi selisih
+    berarti pencairannya yang harus dikoreksi — bukan tautannya yang dipaksakan.
+    """
+    user = await require_auth(request)
+    db = get_db()
+    s = await db.bank_recon_sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Sesi tidak ditemukan")
+    if s.get("status") == "approved":
+        raise HTTPException(400, "Sesi sudah disetujui.")
+    body = await request.json()
+    txn_id = body.get("txn_id")
+    sdoc_id = body.get("settlement_doc_id")
+    txn = await db.bank_recon_txns.find_one({"id": txn_id, "session_id": session_id}, {"_id": 0})
+    if not txn:
+        raise HTTPException(404, "Transaksi tidak ditemukan.")
+    if txn.get("is_matched"):
+        raise HTTPException(409, "Mutasi ini sudah dicocokkan. Lepas dulu tautannya (unmatch).")
+    if txn.get("type") != "debit":
+        raise HTTPException(400, "Pencairan marketplace adalah uang MASUK — baris mutasi ini adalah uang keluar.")
+    st = await db.marketing_settlements.find_one({"id": sdoc_id}, {"_id": 0})
+    if not st:
+        raise HTTPException(404, "Pencairan tidak ditemukan.")
+    if st.get("bank_txn_id") and st.get("bank_txn_id") != txn_id:
+        raise HTTPException(409, f"Pencairan {st.get('settlement_id')} sudah tertaut ke mutasi lain "
+                                 f"(tanggal {st.get('bank_txn_date')}).")
+    diff = round(float(st.get("net_payout") or 0) - float(txn.get("amount") or 0), 2)
+    if abs(diff) > SETTLEMENT_AMOUNT_TOLERANCE:
+        rp = lambda v: f"Rp {float(v or 0):,.0f}".replace(",", ".")  # noqa: E731
+        raise HTTPException(
+            400, f"Nominal berbeda: mutasi bank {rp(txn.get('amount'))} vs "
+                 f"pencairan {st.get('settlement_id')} {rp(st.get('net_payout'))} "
+                 f"(selisih {rp(diff)}). Koreksi 'Nominal dicairkan' di Pencairan Marketplace "
+                 f"agar sama dengan mutasi bank, lalu tautkan lagi.")
+    now = _now()
+    ref = f"Pencairan {st.get('settlement_id')} · {st.get('platform') or ''}".strip(" ·")
+    await db.bank_recon_txns.update_one(
+        {"id": txn_id},
+        {"$set": {"is_matched": True, "match_id": sdoc_id, "match_ref": ref,
+                  "match_type": "settlement", "matched_at": now}})
+    await db.marketing_settlements.update_one(
+        {"id": sdoc_id},
+        {"$set": {"bank_txn_id": txn_id, "bank_session_id": session_id,
+                  "bank_txn_date": txn.get("txn_date"), "bank_linked_at": now,
+                  "bank_linked_by": user.get("email")}})
+    await _recalculate_session(db, session_id)
+    return {"ok": True, "txn_id": txn_id, "settlement_doc_id": sdoc_id, "match_ref": ref,
+            "message": f"Mutasi {txn.get('txn_date')} ditautkan ke pencairan {st.get('settlement_id')}."}
 
 
 # ═══════════════════════════════════════════════════════════════════

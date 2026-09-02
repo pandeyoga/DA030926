@@ -7,10 +7,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import PaginationBar from '@/components/ui/PaginationBar';
 import {
   Loader2, Plus, Check, X, Link, LinkIcon, Unlink, CheckCircle2,
-  AlertCircle, FileText, Upload, ArrowLeftRight, TrendingUp, RotateCcw
+  AlertCircle, FileText, Upload, ArrowLeftRight, TrendingUp, RotateCcw, Banknote
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { formatRupiah } from '@/lib/format';
+import { SettlementLinkPicker } from './SettlementLinkPicker';
 
 const API = process.env.REACT_APP_BACKEND_URL;
 
@@ -225,6 +226,7 @@ function SessionDetail({ session, headers, onBack }) {
   const [showImport, setShowImport] = useState(false);
   const [showAddTxn, setShowAddTxn] = useState(false);
   const [selectedTxn, setSelectedTxn] = useState(null);
+  const [pickerFor, setPickerFor] = useState(null); // txn.id yang membuka pemilih pencairan marketplace
   const [filterMatched, setFilterMatched] = useState(null);
   const [approving, setApproving] = useState(false);
   const [autoMatching, setAutoMatching] = useState(false);
@@ -584,8 +586,13 @@ function SessionDetail({ session, headers, onBack }) {
                         {txn.type === 'debit' ? '+' : '-'}{fmt(txn.amount)}
                       </span>
                       {txn.is_matched && (
-                        <span className="text-xs text-green-600 flex items-center gap-1">
+                        <span className="text-xs text-green-600 flex items-center gap-1"
+                          data-testid={`txn-matched-${txn.id}`}>
                           <Check className="w-3 h-3" /> Matched: {txn.match_ref}
+                          {txn.match_type === 'settlement' ? (
+                            <span className="ml-1 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 text-[10px]"
+                              data-testid={`txn-settlement-badge-${txn.id}`}>pencairan marketplace</span>
+                          ) : null}
                         </span>
                       )}
                     </div>
@@ -593,14 +600,25 @@ function SessionDetail({ session, headers, onBack }) {
                   <div className="flex gap-1">
                     {!txn.is_matched && session.status !== 'approved' && (
                       <button data-testid={`btn-match-${txn.id}`}
-                        onClick={() => setSelectedTxn(selectedTxn?.id === txn.id ? null : txn)}
+                        title="Cocokkan dengan GL entry"
+                        onClick={() => { setPickerFor(null); setSelectedTxn(selectedTxn?.id === txn.id ? null : txn); }}
                         className={`p-1.5 rounded text-xs font-medium transition-colors
                           ${selectedTxn?.id === txn.id ? 'bg-primary text-primary-foreground' : 'bg-muted hover:bg-primary/10'}`}>
                         <LinkIcon className="w-3.5 h-3.5" />
                       </button>
                     )}
+                    {!txn.is_matched && session.status !== 'approved' && txn.type === 'debit' && (
+                      <button data-testid={`btn-link-settlement-${txn.id}`}
+                        title="Tautkan ke Pencairan Marketplace (Shopee/TikTok)"
+                        onClick={() => { setSelectedTxn(null); setPickerFor(pickerFor === txn.id ? null : txn.id); }}
+                        className={`p-1.5 rounded text-xs font-medium transition-colors
+                          ${pickerFor === txn.id ? 'bg-emerald-600 text-white' : 'bg-muted hover:bg-emerald-500/10 text-emerald-700'}`}>
+                        <Banknote className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     {txn.is_matched && session.status !== 'approved' && (
-                      <button onClick={() => unmatchTxn(txn)}
+                      <button onClick={() => unmatchTxn(txn)} data-testid={`btn-unmatch-${txn.id}`}
+                        title="Lepas tautan"
                         className="p-1.5 rounded hover:bg-amber-100 text-muted-foreground hover:text-amber-600">
                         <Unlink className="w-3.5 h-3.5" />
                       </button>
@@ -613,6 +631,12 @@ function SessionDetail({ session, headers, onBack }) {
                     )}
                   </div>
                 </div>
+
+                {/* Pemilih pencairan marketplace */}
+                {pickerFor === txn.id && !txn.is_matched && (
+                  <SettlementLinkPicker sessionId={session.id} txn={txn} headers={headers}
+                    onLink={(d) => { toast({ title: d.message || 'Mutasi ditautkan ke pencairan.' }); setPickerFor(null); load(); }} />
+                )}
 
                 {/* GL entry picker */}
                 {selectedTxn?.id === txn.id && (

@@ -468,6 +468,7 @@ async def list_settlements(
     ]).to_list(1)
     s = agg[0] if agg else {}
     unverified = await db[COLL].count_documents({**q, "math_verified": False})
+    bank_linked = await db[COLL].count_documents({**q, "bank_txn_id": {"$nin": [None, ""]}})
 
     return {
         "ok": True,
@@ -479,6 +480,8 @@ async def list_settlements(
             "deduction_pct": round(float(s.get("ded") or 0) / float(s["gross"]) * 100, 2)
             if s.get("gross") else 0.0,
             "unverified_count": unverified,
+            "bank_linked_count": bank_linked,
+            "bank_unlinked_count": total - bank_linked,
         },
         "pagination": {"total": total, "page": page, "page_size": page_size,
                        "total_pages": max(1, (total + page_size - 1) // page_size)},
@@ -556,6 +559,11 @@ async def update_settlement(sid: str, body: SettlementIn, request: Request):
                  f"mengubah angkanya — kalau tidak, jurnal dan sumbernya akan "
                  f"menyebut angka yang berbeda.")
     upd = body.dict()
+    if cur.get("bank_txn_id") and round(float(upd.get("net_payout") or 0), 2) != round(float(cur.get("net_payout") or 0), 2):
+        locked = f"Rp {float(cur.get('net_payout') or 0):,.0f}".replace(",", ".")
+        raise HTTPException(
+            400, f"Nominal dicairkan sudah TERTAUT ke mutasi bank tanggal {cur.get('bank_txn_date')} "
+                 f"({locked}). Lepas tautannya di Rekonsiliasi Bank dulu bila memang mutasinya yang salah.")
     if cur.get("je_id"):
         upd.update({"je_id": None, "je_number": None, "je_status": None,
                     "je_voided_ref": cur.get("je_number")})
@@ -580,6 +588,10 @@ async def delete_settlement(sid: str, request: Request):
         raise HTTPException(
             400, f"Tidak bisa dihapus: sudah terbit jurnal {cur.get('je_number')}. "
                  f"Void jurnalnya dulu di Portal Finance.")
+    if cur.get("bank_txn_id"):
+        raise HTTPException(
+            400, f"Tidak bisa dihapus: sudah tertaut ke mutasi bank tanggal {cur.get('bank_txn_date')}. "
+                 f"Lepas tautannya di Rekonsiliasi Bank dulu.")
     await db[COLL].delete_one({"id": sid})
     return {"ok": True}
 

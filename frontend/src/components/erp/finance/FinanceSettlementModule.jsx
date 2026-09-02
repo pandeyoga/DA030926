@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Banknote, RefreshCw, AlertTriangle, CheckCircle2, Loader2, Store, Percent,
-  Plus, Scale, BookCheck, Send, X, Trash2, Pencil, Upload,
+  Plus, Scale, BookCheck, Send, X, Trash2, Pencil, Upload, Landmark,
 } from 'lucide-react';
 import { GlassCard } from '@/components/ui/glass';
 import { Badge } from '@/components/ui/badge';
@@ -383,7 +383,7 @@ export default function FinanceSettlementModule() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Kpi testId="fin-settlement-kpi-net" icon={Banknote} label="Total dicairkan"
           value={rp(summary?.net_payout || 0)} tone="good"
-          hint={`${rows.length} pencairan tercatat${range.from || range.to ? ` · ${range.from || '…'} → ${range.to || '…'}` : ''}`} />
+          hint={`${rows.length} pencairan tercatat${range.from || range.to ? ` · ${range.from || '…'} → ${range.to || '…'}` : ''} · ${summary?.bank_linked_count || 0} tertaut mutasi bank`} />
         <Kpi testId="fin-settlement-kpi-gross" icon={Store} label="Omzet bruto terkait"
           value={rp(summary?.gross_sales || 0)} />
         <Kpi testId="fin-settlement-kpi-ded" icon={Percent} label="Potongan platform"
@@ -616,7 +616,20 @@ export default function FinanceSettlementModule() {
                         <span className="text-xs text-foreground/50"> ({r.deduction_pct}%)</span>
                       ) : null}
                     </td>
-                    <td className="py-2 px-3 text-right tabular-nums font-medium">{rp(r.net_payout || 0)}</td>
+                    <td className="py-2 px-3 text-right tabular-nums font-medium">
+                      {rp(r.net_payout || 0)}
+                      {r.bank_txn_id ? (
+                        <div className="text-[10px] text-emerald-600 flex items-center justify-end gap-0.5"
+                          title={`Tertaut ke mutasi bank tanggal ${r.bank_txn_date}`}
+                          data-testid={`fin-settlement-bank-linked-${r.settlement_id}`}>
+                          <Landmark className="w-3 h-3" /> mutasi {r.bank_txn_date}
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-foreground/40" data-testid={`fin-settlement-bank-unlinked-${r.settlement_id}`}>
+                          belum tertaut bank
+                        </div>
+                      )}
+                    </td>
                     <td className="py-2 px-3">
                       {r.math_verified ? (
                         <Badge variant="outline" className="text-[10px] text-emerald-600">
@@ -660,18 +673,20 @@ export default function FinanceSettlementModule() {
                         ) : null}
                         {!r.je_id ? (
                           <>
-                            <button title="Koreksi angka"
+                            <button title={r.bank_txn_id ? 'Koreksi angka (nominal dicairkan terkunci oleh tautan bank)' : 'Koreksi angka'}
                               data-testid={`fin-settlement-edit-${r.settlement_id}`}
                               onClick={() => openEdit(r)}
                               className="p-1.5 rounded hover:bg-foreground/10">
                               <Pencil className="w-4 h-4" />
                             </button>
-                            <button title="Hapus"
-                              data-testid={`fin-settlement-delete-${r.settlement_id}`}
-                              disabled={busy === `delete:${r.id}`} onClick={() => act(r, 'delete')}
-                              className="p-1.5 rounded hover:bg-foreground/10 text-red-600 disabled:opacity-40">
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                            {!r.bank_txn_id ? (
+                              <button title="Hapus"
+                                data-testid={`fin-settlement-delete-${r.settlement_id}`}
+                                disabled={busy === `delete:${r.id}`} onClick={() => act(r, 'delete')}
+                                className="p-1.5 rounded hover:bg-foreground/10 text-red-600 disabled:opacity-40">
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            ) : null}
                           </>
                         ) : null}
                       </div>

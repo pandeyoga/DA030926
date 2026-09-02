@@ -156,6 +156,20 @@ See `/app/memory/test_credentials.md` (admin@garment.com / Admin@123).
   Persetujuan Perubahan Invoice, Master Akuntansi) · ANGGARAN, BIAYA & ASET. `FinanceDashboard` akses cepat
   diselaraskan ke 6 grup yang sama. Guard INV-NAV-01 hijau. Diuji iteration_100 (8/8 backend + UI lulus).
 
+### 2026-09-02 (lanjutan 3) — Tautan Mutasi Bank ↔ Pencairan Marketplace
+- `routes/dewi_bank_reconciliation.py`: `GET /api/finance/bank-recon/sessions/{sid}/transactions/{txn}/settlement-candidates`
+  (urut: nominal sama → tanggal terdekat; pencairan yang sudah tertaut ke mutasi lain disembunyikan) dan
+  `POST .../link-settlement {txn_id, settlement_doc_id}` — hanya baris **debit** (uang masuk), nominal harus sama
+  (toleransi Rp1; selisih ⇒ 400 "koreksi Nominal dicairkan dulu"), 409 bila salah satu sudah tertaut. Menulis
+  `bank_recon_txns.match_type='settlement'` + `marketing_settlements.bank_txn_id/bank_session_id/bank_txn_date`.
+  `unmatch` melepas dua arah.
+- `marketing_settlements.py`: PUT menolak perubahan `net_payout` bila tertaut bank; DELETE menolak bila tertaut;
+  summary daftar memuat `bank_linked_count`/`bank_unlinked_count`.
+- UI: tombol hijau (Banknote) per baris mutasi di Rekonsiliasi Bank → `SettlementLinkPicker.jsx`; badge
+  "pencairan marketplace" pada baris matched; kolom Dicairkan di Pencairan Marketplace menampilkan
+  "mutasi <tanggal>" / "belum tertaut bank"; tombol hapus hilang bila tertaut. Diuji iteration_101 (17/17 + UI).
+- Data uji: sesi rekon 2026-08 BCA 1-131 (a6f8da0f…) dengan 3 mutasi; T1 tertaut ke STL-TEST-001.
+
 ## Session log — Fase 2 FIX: State machine enforcement + verifikasi RBAC live (Feb 2026)
 Temuan verifikasi independen user: PO Draft bisa langsung Closed via /status (200).
 - **Keputusan: BUG-FIX (kategori C-1..M-3), bukan port** — referensi sommerville-adopt sendiri hanya
