@@ -461,6 +461,13 @@ export const PORTAL_NAV = {
   //   Ringkasan → Piutang (uang masuk) → Hutang/Pengadaan (uang keluar terikat) →
   //   Kas/Bank & Biaya (eksekusi uang) → Akuntansi (pencatatan) → Perencanaan.
   // TIDAK ADA pintu dihapus/ditambah (24 pintu tetap 24) — murni relokasi menu.
+  // 2026-09-02 — IA v3 Keuangan (keputusan pemilik): section lama "PENJUALAN &
+  // PIUTANG" (2 pintu, Channel GL = peta akun, bukan piutang) dan "KAS, BANK &
+  // BIAYA" (8 pintu campur: bank, pencairan, klaim, kasbon, dinas) dibubarkan.
+  // Prinsip: satu section = satu arah uang. Uang MASUK (penjualan/penerimaan),
+  // uang di TANGAN (kas & bank), uang KELUAR ke orang (pengeluaran & karyawan),
+  // PENCATATAN (akuntansi), PERENCANAAN (anggaran/biaya/aset), OUTPUT (laporan).
+  // Tidak ada pintu dihapus; hanya relokasi + 4 label diperjelas.
   finance: {
     title: 'Keuangan',
     sections: [
@@ -471,57 +478,51 @@ export const PORTAL_NAV = {
           { id: 'fin-recap',            label: 'Rekap Keuangan',     icon: BarChart3 },
           { id: 'fin-reports-hub',      label: 'Laporan Keuangan',   icon: FileSpreadsheet },
           { id: 'fin-executive-report', label: 'Laporan Eksekutif',  icon: Award },
-          { id: 'fin-ai-cashflow',      label: 'Prediksi Kas',       icon: Brain },
         ],
       },
       {
-        label: 'PENJUALAN & PIUTANG',
+        label: 'PENJUALAN & PENERIMAAN',
         items: [
-          // 'Invoice AR' (fin-ar-invoices) disembunyikan — KEPUTUSAN #1 (AR marketing dimatikan;
-          // pendapatan dicatat via Jurnal Manual). Modul/endpoint AR tetap ada untuk keperluan lain.
-          { id: 'fin-ar-360',     label: 'Aging Piutang', icon: Scale },
-          { id: 'fin-channel-gl', label: 'Channel GL',    icon: Store },
-        ],
-      },
-      {
-        label: 'KAS, BANK & BIAYA',
-        items: [
-          { id: 'fin-cash',             label: 'Kas & Bank',          icon: Landmark },
-          { id: 'fin-petty-cash',       label: 'Kas Kecil',           icon: Wallet },
-          { id: 'fin-bank-transfer',    label: 'Transfer Bank',       icon: ArrowRightLeft },
-          { id: 'fin-bank-recon',       label: 'Rekonsiliasi Bank',   icon: Hourglass },
-          // SESI #37 — pintu BARU. Sebelumnya tidak ada satu pun layar yang bisa
-          // MENCATAT pencairan marketplace: backendnya lengkap sejak F9, tetapi
-          // layar Marketing sengaja baca-saja. Jadi uang yang masuk dari
-          // Shopee/TikTok tidak punya pintu masuk ke buku besar.
           { id: 'fin-marketplace-settlement', label: 'Pencairan Marketplace', icon: Banknote },
-          { id: 'fin-expenses',         label: 'Pengeluaran & Klaim', icon: Receipt },
-          { id: 'fin-kasbon',           label: 'Kasbon & Pinjaman',   icon: HandCoins },
-          { id: 'fin-settlement-queue', label: 'Settlement Dinas',    icon: FileText },
+          { id: 'fin-ar-360',                 label: 'Aging Piutang',         icon: Scale },
+          { id: 'fin-channel-gl',             label: 'Peta Akun Channel',     icon: Store },
         ],
       },
       {
-        // 2026-08-06: section "PENGADAAN & HUTANG" DIBUBARKAN — 'Permintaan
-        // Pengadaan' & 'Rekonsiliasi PO' pindah ke Portal Pengadaan. Sisanya
-        // ('Persetujuan Invoice' = approval PERUBAHAN invoice AR/AP, bukan
-        // faktur supplier) digabung ke sini supaya tidak ada laci beranggota
-        // satu (langgar MECE / guard NAV-SINGLE).
-        label: 'AKUNTANSI & JURNAL',
+        label: 'KAS & BANK',
         items: [
-          { id: 'fin-accounting-master-hub', label: 'Master Akuntansi', icon: FolderTree },
-          { id: 'fin-journal-hub',           label: 'Jurnal',           icon: BookCheck },
-          { id: 'fin-acctg-adjust-hub',      label: 'Penyesuaian',      icon: Calculator },
-          { id: 'fin-approval',              label: 'Persetujuan Invoice', icon: ShieldAlert },
+          { id: 'fin-cash',          label: 'Kas & Bank',        icon: Landmark },
+          { id: 'fin-petty-cash',    label: 'Kas Kecil',         icon: Wallet },
+          { id: 'fin-bank-transfer', label: 'Transfer Bank',     icon: ArrowRightLeft },
+          { id: 'fin-bank-recon',    label: 'Rekonsiliasi Bank', icon: Hourglass },
+          { id: 'fin-ai-cashflow',   label: 'Prediksi Kas',      icon: Brain },
         ],
       },
       {
-        label: 'ANGGARAN & ASET',
+        label: 'PENGELUARAN & KARYAWAN',
         items: [
-          { id: 'fin-budget',       label: 'Anggaran',    icon: PieChart },
-          { id: 'fin-cost-centers', label: 'Pusat Biaya', icon: Book },
-          { id: 'fin-hpp',          label: 'HPP',         icon: Calculator },
+          { id: 'fin-expenses',         label: 'Pengeluaran & Klaim',          icon: Receipt },
+          { id: 'fin-kasbon',           label: 'Kasbon & Pinjaman',            icon: HandCoins },
+          { id: 'fin-settlement-queue', label: 'Penyelesaian Perjalanan Dinas', icon: FileText },
+        ],
+      },
+      {
+        label: 'AKUNTANSI',
+        items: [
+          { id: 'fin-journal-hub',           label: 'Jurnal',                       icon: BookCheck },
+          { id: 'fin-acctg-adjust-hub',      label: 'Penyesuaian Akhir Periode',    icon: Calculator },
+          { id: 'fin-approval',              label: 'Persetujuan Perubahan Invoice', icon: ShieldAlert },
+          { id: 'fin-accounting-master-hub', label: 'Master Akuntansi',             icon: FolderTree },
+        ],
+      },
+      {
+        label: 'ANGGARAN, BIAYA & ASET',
+        items: [
+          { id: 'fin-budget',       label: 'Anggaran',       icon: PieChart },
+          { id: 'fin-cost-centers', label: 'Pusat Biaya',    icon: Book },
+          { id: 'fin-hpp',          label: 'HPP',            icon: Calculator },
           { id: 'fin-hpp-produk',   label: 'HPP per Potong', icon: Calculator },
-          { id: 'fin-fixed-assets', label: 'Aset Tetap',  icon: Package },
+          { id: 'fin-fixed-assets', label: 'Aset Tetap',     icon: Package },
         ],
       },
     ],

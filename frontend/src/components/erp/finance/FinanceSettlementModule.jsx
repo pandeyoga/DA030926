@@ -27,7 +27,7 @@ import { GlassCard } from '@/components/ui/glass';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
 import { formatRupiah } from '@/lib/format';
-import { SettlementImportPanel } from './SettlementImportPanel';
+import { SettlementImportPanel, computeValues } from './SettlementImportPanel';
 import { SettlementByStoreCards } from './SettlementByStoreCards';
 
 const API = process.env.REACT_APP_BACKEND_URL;
@@ -112,11 +112,24 @@ export default function FinanceSettlementModule() {
   const [refreshKey, setRefreshKey] = useState(0);
   const fileRef = useRef(null);
 
+  // Filter periode: satu bulan (YYYY-MM) ATAU rentang tanggal bebas. Kosong = semua.
+  const [period, setPeriod] = useState({ month: '', from: '', to: '' });
+  const range = useMemo(() => {
+    if (period.month) {
+      const [y, m] = period.month.split('-').map(Number);
+      const last = new Date(y, m, 0).getDate();
+      return { from: `${period.month}-01`, to: `${period.month}-${String(last).padStart(2, '0')}` };
+    }
+    return { from: period.from, to: period.to };
+  }, [period]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const qs = new URLSearchParams({ page_size: '50' });
       if (accountId) qs.set('account_id', accountId);
+      if (range.from) qs.set('date_from', range.from);
+      if (range.to) qs.set('date_to', range.to);
       const d = await call(`?${qs}`);
       setRows(d.data || []);
       setSummary(d.summary || null);
@@ -126,7 +139,7 @@ export default function FinanceSettlementModule() {
     } finally {
       setLoading(false);
     }
-  }, [accountId]);
+  }, [accountId, range.from, range.to]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -153,17 +166,36 @@ export default function FinanceSettlementModule() {
 
   const openCreate = () => { setForm(EMPTY); setEditId(''); setFormOpen(true); };
 
+  const previewCall = async (file, acc) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (acc) fd.append('account_id', acc);
+    const r = await fetch(`${BASE}/import/preview`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token()}` }, body: fd,
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || `Gagal membaca berkas (HTTP ${r.status})`);
+    return d;
+  };
+
+  const applyImport = (d, account_id) => {
+    const f = { ...EMPTY, account_id };
+    MONEY_FIELDS.forEach(([k]) => { f[k] = d.values?.[k] ? String(d.values[k]) : ''; });
+    f.net_payout = d.values?.net_payout ? String(d.values.net_payout) : '';
+    f.settlement_id = d.settlement_id || '';
+    f.settlement_date = d.settlement_date || '';
+    f.period_from = d.period_from || '';
+    f.period_to = d.period_to || '';
+    f.notes = `Diimpor dari ${d.filename} (${d.row_count} baris)`;
+    setForm(f); setEditId(''); setFormOpen(true); setImportRes(d);
+  };
+
   const importFile = async (file) => {
     if (!file) return;
     setBusy('import');
     try {
-      const fd = new FormData();
-      fd.append('file', file);
-      const r = await fetch(`${BASE}/import/preview`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token()}` }, body: fd,
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.detail || `Gagal membaca berkas (HTTP ${r.status})`);
+      const hint = accountId || form.account_id || '';
+      let d = await previewCall(file, hint);
       const guess = d.platform_guess || '';
       const fits = (id) => id && (!guess || accOf(id).platform === guess);
       // Toko dipilih ULANG tiap impor dari platform yang terdeteksi — jangan mewarisi
@@ -175,22 +207,47 @@ export default function FinanceSettlementModule() {
         const cand = accounts.filter((a) => a.platform === guess);
         if (cand.length === 1) account_id = cand[0].id;
       }
-      const f = { ...EMPTY, account_id };
-      MONEY_FIELDS.forEach(([k]) => { f[k] = d.values?.[k] ? String(d.values[k]) : ''; });
-      f.net_payout = d.values?.net_payout ? String(d.values.net_payout) : '';
-      f.settlement_id = d.settlement_id || '';
-      f.settlement_date = d.settlement_date || '';
-      f.period_from = d.period_from || '';
-      f.period_to = d.period_to || '';
-      f.notes = `Diimpor dari ${d.filename} (${d.row_count} baris)`;
-      setForm(f); setEditId(''); setFormOpen(true); setImportRes(d);
+      // Pemetaan tersimpan milik TOKO; bila toko akhirnya berbeda dari petunjuk awal, baca ulang.
+      if (account_id && account_id !== hint) d = await previewCall(file, account_id);
+      applyImport(d, account_id);
       if (!account_id) toast.warning(`Toko belum dipilih — laporan terdeteksi ${guess || 'tanpa platform'}; pilih toko yang benar sebelum menyimpan.`);
-      toast.success(`${Object.keys(d.mapping || {}).length} field terisi dari laporan — periksa lalu simpan.`);
+      toast.success(d.mapping_source === 'saved'
+        ? 'Format laporan dikenali — pemetaan tersimpan dipakai. Periksa sekilas lalu simpan.'
+        : `${Object.keys(d.mapping || {}).length} field terisi dari tebakan otomatis — periksa pemetaan kolom lalu simpan.`);
     } catch (e) {
       toast.error(e.message);
     } finally {
       setBusy('');
       if (fileRef.current) fileRef.current.value = '';
+    }
+  };
+
+  // Staf mengubah tujuan kolom → angka form dihitung ulang dengan rumus yang sama seperti server.
+  const changeMapping = (mapping) => {
+    if (!importRes) return;
+    const values = computeValues(mapping, importRes.column_totals || {});
+    setImportRes({ ...importRes, mapping, values, mapping_source: 'edited' });
+    setForm((prev) => {
+      const f = { ...prev };
+      MONEY_FIELDS.forEach(([k]) => { f[k] = values[k] ? String(values[k]) : ''; });
+      f.net_payout = values.net_payout ? String(values.net_payout) : '';
+      return f;
+    });
+  };
+
+  const rememberMapping = async (account_id) => {
+    if (!importRes?.mapping) return;
+    try {
+      await call('/import/mapping', {
+        method: 'POST',
+        body: JSON.stringify({
+          account_id, headers: importRes.headers || importRes.numeric_columns || [], mapping: importRes.mapping,
+          meta_columns: importRes.meta_columns || {}, filename: importRes.filename || '',
+        }),
+      });
+      toast.message('Pemetaan kolom diingat untuk toko & format laporan ini.');
+    } catch (e) {
+      toast.warning(`Pencairan tersimpan, tetapi pemetaan kolom gagal diingat: ${e.message}`);
     }
   };
   const openEdit = (r) => {
@@ -220,6 +277,7 @@ export default function FinanceSettlementModule() {
         ? 'Pencairan tersimpan dan angkanya seimbang.'
         : `Tersimpan, tetapi masih ada selisih ${rp(d.data?.net_payout_diff || 0)} — beri nama dulu sebelum dijurnal.`);
       setFormOpen(false);
+      if (!editId && importRes) await rememberMapping(form.account_id);
       setImportRes(null);
       await load();
     } catch (e) {
@@ -270,7 +328,7 @@ export default function FinanceSettlementModule() {
             terpaksa diberi nama. Marketing hanya melihat hasilnya.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <select data-testid="fin-settlement-account-filter" value={accountId}
             onChange={(e) => setAccountId(e.target.value)}
             className="h-9 bg-foreground/5 border border-foreground/10 rounded-lg px-2 text-sm">
@@ -279,6 +337,28 @@ export default function FinanceSettlementModule() {
               <option key={a.id} value={a.id}>{a.account_name} · {a.platform}</option>
             ))}
           </select>
+          <div className="flex items-center gap-1 h-9 bg-foreground/5 border border-foreground/10 rounded-lg px-2 text-xs"
+            data-testid="fin-settlement-period-filter">
+            <input type="month" data-testid="fin-settlement-filter-month" value={period.month}
+              title="Filter satu bulan"
+              onChange={(e) => setPeriod({ month: e.target.value, from: '', to: '' })}
+              className="h-7 bg-transparent text-xs" />
+            <span className="text-foreground/40">atau</span>
+            <input type="date" data-testid="fin-settlement-filter-from" value={period.from}
+              title="Dari tanggal"
+              onChange={(e) => setPeriod({ month: '', from: e.target.value, to: period.to })}
+              className="h-7 bg-transparent text-xs" />
+            <span className="text-foreground/40">–</span>
+            <input type="date" data-testid="fin-settlement-filter-to" value={period.to}
+              title="Sampai tanggal"
+              onChange={(e) => setPeriod({ month: '', from: period.from, to: e.target.value })}
+              className="h-7 bg-transparent text-xs" />
+            {(period.month || period.from || period.to) ? (
+              <button data-testid="fin-settlement-filter-clear" title="Hapus filter periode"
+                onClick={() => setPeriod({ month: '', from: '', to: '' })}
+                className="p-1 rounded hover:bg-foreground/10"><X className="w-3.5 h-3.5" /></button>
+            ) : null}
+          </div>
           <button data-testid="fin-settlement-refresh" onClick={load}
             className="h-9 px-3 rounded-lg bg-foreground/5 hover:bg-foreground/10 text-sm flex items-center gap-1.5">
             <RefreshCw className="w-4 h-4" /> Muat ulang
@@ -303,7 +383,7 @@ export default function FinanceSettlementModule() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Kpi testId="fin-settlement-kpi-net" icon={Banknote} label="Total dicairkan"
           value={rp(summary?.net_payout || 0)} tone="good"
-          hint={`${rows.length} pencairan tercatat`} />
+          hint={`${rows.length} pencairan tercatat${range.from || range.to ? ` · ${range.from || '…'} → ${range.to || '…'}` : ''}`} />
         <Kpi testId="fin-settlement-kpi-gross" icon={Store} label="Omzet bruto terkait"
           value={rp(summary?.gross_sales || 0)} />
         <Kpi testId="fin-settlement-kpi-ded" icon={Percent} label="Potongan platform"
@@ -316,7 +396,8 @@ export default function FinanceSettlementModule() {
       </div>
 
       {/* ── HASIL IMPOR ── */}
-      <SettlementImportPanel result={importRes} onClose={() => setImportRes(null)} />
+      <SettlementImportPanel result={importRes} onClose={() => setImportRes(null)}
+        onMappingChange={changeMapping} />
 
       {/* ── FORM ── */}
       {formOpen ? (
@@ -487,7 +568,7 @@ export default function FinanceSettlementModule() {
       ) : null}
 
       {/* ── PER TOKO ── */}
-      <SettlementByStoreCards refreshKey={refreshKey} />
+      <SettlementByStoreCards refreshKey={refreshKey} month={period.month} />
 
       {/* ── DAFTAR ── */}
       <GlassCard className="p-0 overflow-hidden">
@@ -497,7 +578,7 @@ export default function FinanceSettlementModule() {
           </div>
         ) : rows.length === 0 ? (
           <div className="py-12 text-center text-sm text-foreground/60 px-6" data-testid="fin-settlement-empty">
-            Belum ada pencairan tercatat{accountId ? ' untuk toko ini' : ''}.
+            Belum ada pencairan tercatat{accountId ? ' untuk toko ini' : ''}{range.from || range.to ? ' pada periode ini' : ''}.
             <div className="mt-1 text-xs text-foreground/50">
               Buka mutasi bank, lalu tekan “Catat pencairan”.
             </div>

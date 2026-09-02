@@ -23,10 +23,13 @@ function pctTone(p, avg) {
   return 'text-amber-600 dark:text-amber-300';
 }
 
-export function SettlementByStoreCards({ refreshKey }) {
-  const [month, setMonth] = useState('');
+export function SettlementByStoreCards({ refreshKey, month: monthProp = '' }) {
+  const [month, setMonth] = useState(monthProp);
   const [res, setRes] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  // Filter bulan di daftar pencairan ikut menggerakkan kartu ini (satu periode, satu layar).
+  useEffect(() => { setMonth(monthProp); }, [monthProp]);
 
   const load = useCallback(async (m) => {
     setLoading(true);

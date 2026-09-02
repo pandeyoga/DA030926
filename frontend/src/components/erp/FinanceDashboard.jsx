@@ -1,45 +1,61 @@
 import { GlassCard, GlassPanel } from '@/components/ui/glass';
 import { motion } from 'framer-motion';
 import {
-  BarChart3, ReceiptText, CreditCard, HandCoins, PieChart,
-  Calculator, BookCheck, TrendingUp, Scale, Wallet, FolderTree, FileText,
+  BarChart3, HandCoins, PieChart, Calculator, BookCheck, Scale, Wallet, FolderTree,
+  FileText, FileSpreadsheet, Award, Banknote, Store, Landmark, ArrowRightLeft, Hourglass,
+  Brain, Receipt, ShieldAlert, Book, Package,
 } from 'lucide-react';
 
-// Quick links — moduleId harus selaras dengan MODULE_REGISTRY (fin-*).
-// Ikon dipilih distinct (hasil UX audit).
-// Session #11.17: Legacy fin-ap + fin-payments REMOVED; replaced with SSOT fin-ap-aging.
+// Akses cepat — grup & urutannya SAMA dengan section sidebar Keuangan (portalNav.js,
+// IA v3 2026-09-02) supaya pemakai tidak menemukan dua peta untuk satu portal.
 const QUICK_LINKS = [
-  // Operasional
-  { id: 'fin-ar-invoices',    label: 'Invoice Penjualan (AR)', desc: 'Buat & kirim invoice ke pelanggan.',       icon: ReceiptText,  group: 'operasional' },
-  { id: 'fin-ap-aging',       label: 'Hutang Vendor (AP Aging)', desc: 'Kelola hutang vendor & aging report (SSOT).', icon: CreditCard,  group: 'operasional' },
-  { id: 'fin-ar-360',         label: 'AR 360° (Aging & Statement)', desc: 'Aging matrix piutang + customer statement.', icon: HandCoins, group: 'operasional' },
-  { id: 'fin-cash',           label: 'Kas & Bank',              desc: 'Saldo akun kas/bank & pergerakan.',         icon: HandCoins,   group: 'operasional' },
-  // Analisis
-  { id: 'fin-hpp',            label: 'HPP / Costing',           desc: 'Hitung harga pokok per Work Order.',        icon: Calculator,  group: 'analisis' },
-  { id: 'fin-recap',          label: 'Rekap Keuangan',          desc: 'Ringkasan keuangan & analisis margin.',     icon: PieChart,    group: 'analisis' },
-  // Akuntansi
-  { id: 'fin-coa',            label: 'Chart of Accounts',       desc: 'Struktur akun PSAK/SAK-ETAP.',              icon: FolderTree,  group: 'akuntansi' },
-  { id: 'fin-journal-entry',  label: 'Jurnal Umum',             desc: 'Input jurnal manual double-entry.',         icon: BookCheck,   group: 'akuntansi' },
-  { id: 'fin-trial-balance',  label: 'Neraca Saldo',            desc: 'Trial balance — debit vs kredit.',          icon: Scale,       group: 'akuntansi' },
-  { id: 'fin-pnl',            label: 'Laporan Laba Rugi',       desc: 'P&L periodik dengan drill-down.',           icon: TrendingUp,  group: 'akuntansi' },
-  { id: 'fin-cash-flow',      label: 'Laporan Arus Kas',        desc: 'Cash flow — operasi/investasi/pendanaan.',  icon: Wallet,      group: 'akuntansi' },
-  { id: 'fin-journal-list',   label: 'Daftar Jurnal',           desc: 'Seluruh JE terposting dengan filter.',      icon: FileText,    group: 'akuntansi' },
+  { id: 'fin-recap',            label: 'Rekap Keuangan',   desc: 'Ringkasan keuangan & analisis margin.',        icon: BarChart3,      group: 'laporan' },
+  { id: 'fin-reports-hub',      label: 'Laporan Keuangan', desc: 'Neraca saldo, buku besar, L/R, neraca, arus kas.', icon: FileSpreadsheet, group: 'laporan' },
+  { id: 'fin-executive-report', label: 'Laporan Eksekutif', desc: 'Ringkasan manajemen untuk pemilik.',         icon: Award,          group: 'laporan' },
+
+  { id: 'fin-marketplace-settlement', label: 'Pencairan Marketplace', desc: 'Uang masuk dari Shopee/TikTok & potongannya.', icon: Banknote, group: 'penerimaan' },
+  { id: 'fin-ar-360',                 label: 'Aging Piutang',         desc: 'Umur piutang & statement pelanggan.',        icon: Scale,    group: 'penerimaan' },
+  { id: 'fin-channel-gl',             label: 'Peta Akun Channel',     desc: 'Akun pendapatan per channel penjualan.',      icon: Store,    group: 'penerimaan' },
+
+  { id: 'fin-cash',          label: 'Kas & Bank',        desc: 'Saldo akun kas/bank & pergerakan.',       icon: Landmark,       group: 'kas' },
+  { id: 'fin-petty-cash',    label: 'Kas Kecil',         desc: 'Pengeluaran kecil harian & pengisian.',   icon: Wallet,         group: 'kas' },
+  { id: 'fin-bank-transfer', label: 'Transfer Bank',     desc: 'Pindah dana antar rekening.',             icon: ArrowRightLeft, group: 'kas' },
+  { id: 'fin-bank-recon',    label: 'Rekonsiliasi Bank', desc: 'Cocokkan mutasi bank dengan buku.',        icon: Hourglass,      group: 'kas' },
+  { id: 'fin-ai-cashflow',   label: 'Prediksi Kas',      desc: 'Perkiraan arus kas ke depan.',            icon: Brain,          group: 'kas' },
+
+  { id: 'fin-expenses',         label: 'Pengeluaran & Klaim',          desc: 'Pengeluaran umum & pencairan klaim karyawan.', icon: Receipt,   group: 'pengeluaran' },
+  { id: 'fin-kasbon',           label: 'Kasbon & Pinjaman',            desc: 'Kasbon karyawan & cicilannya.',              icon: HandCoins, group: 'pengeluaran' },
+  { id: 'fin-settlement-queue', label: 'Penyelesaian Perjalanan Dinas', desc: 'Selesaikan uang muka perjalanan dinas.',     icon: FileText,  group: 'pengeluaran' },
+
+  { id: 'fin-journal-hub',           label: 'Jurnal',                       desc: 'Jurnal umum & daftar jurnal.',              icon: BookCheck,   group: 'akuntansi' },
+  { id: 'fin-acctg-adjust-hub',      label: 'Penyesuaian Akhir Periode',    desc: 'Akrual, depresiasi, hapus buku, pelepasan aset.', icon: Calculator, group: 'akuntansi' },
+  { id: 'fin-approval',              label: 'Persetujuan Perubahan Invoice', desc: 'Setujui perubahan invoice AR/AP.',          icon: ShieldAlert, group: 'akuntansi' },
+  { id: 'fin-accounting-master-hub', label: 'Master Akuntansi',             desc: 'Bagan akun, profil posting, periode.',       icon: FolderTree,  group: 'akuntansi' },
+
+  { id: 'fin-budget',       label: 'Anggaran',       desc: 'Rencana vs realisasi anggaran.',        icon: PieChart,   group: 'perencanaan' },
+  { id: 'fin-cost-centers', label: 'Pusat Biaya',    desc: 'Alokasi biaya per pusat biaya.',        icon: Book,       group: 'perencanaan' },
+  { id: 'fin-hpp',          label: 'HPP',            desc: 'Harga pokok per Work Order.',           icon: Calculator, group: 'perencanaan' },
+  { id: 'fin-hpp-produk',   label: 'HPP per Potong', desc: 'Harga pokok per produk/potong.',        icon: Calculator, group: 'perencanaan' },
+  { id: 'fin-fixed-assets', label: 'Aset Tetap',     desc: 'Daftar aset & penyusutannya.',          icon: Package,    group: 'perencanaan' },
 ];
 
 const GROUP_META = {
-  operasional: { label: 'Operasional', desc: 'Transaksi harian keuangan.' },
-  analisis:    { label: 'Analisis & Rekap', desc: 'Costing, rekap, dan laporan manajemen.' },
-  akuntansi:   { label: 'Akuntansi', desc: 'Jurnal, laporan keuangan, dan arus kas.' },
+  laporan:     { label: 'Ringkasan & Laporan',     desc: 'Output — angka yang dibaca pemilik.' },
+  penerimaan:  { label: 'Penjualan & Penerimaan',  desc: 'Uang masuk dari penjualan & pelanggan.' },
+  kas:         { label: 'Kas & Bank',              desc: 'Uang di tangan — saldo, transfer, rekonsiliasi.' },
+  pengeluaran: { label: 'Pengeluaran & Karyawan',  desc: 'Uang keluar ke karyawan & operasional.' },
+  akuntansi:   { label: 'Akuntansi',               desc: 'Pencatatan — jurnal, penyesuaian, master.' },
+  perencanaan: { label: 'Anggaran, Biaya & Aset',  desc: 'Perencanaan — anggaran, HPP, aset.' },
 };
 
 export default function FinanceDashboard({ onNavigate }) {
-  const groups = ['operasional', 'analisis', 'akuntansi'];
+  const groups = Object.keys(GROUP_META);
 
   return (
     <div className="space-y-6" data-testid="finance-dashboard">
       <div>
         <h1 className="text-2xl font-bold text-foreground">Portal Keuangan</h1>
-        <p className="text-muted-foreground text-sm mt-1">Invoice, pembayaran, piutang/hutang, cost center, akuntansi lengkap, dan laporan.</p>
+        <p className="text-muted-foreground text-sm mt-1">Diurutkan menurut alur uang: laporan → uang masuk → kas & bank → uang keluar → pencatatan → perencanaan.</p>
       </div>
 
       <GlassPanel className="p-4 flex items-center gap-3">

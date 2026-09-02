@@ -141,6 +141,21 @@ See `/app/memory/test_credentials.md` (admin@garment.com / Admin@123).
 - PENTING: frontend di env ini dilayani sebagai bundel statis (`static_server.js`) — setelah ubah `frontend/src`
   WAJIB `bash /app/scripts/rebuild_frontend.sh` (lihat `memory/PREVIEW_STABLE_MODE.md`).
 
+### 2026-09-02 (lanjutan 2) — Ingat pemetaan kolom · Filter periode · IA Keuangan v3
+- **Ingat pemetaan** (`marketing_settlement_import_maps`, kunci `(account_id, fingerprint)`; fingerprint = sha1
+  seluruh header ternormalisasi): `POST/GET /api/marketing/settlements/import/mapping`, `DELETE .../mapping/{id}`.
+  `import/preview` menerima form `account_id` → bila ada peta tersimpan, `mapping_source: saved`; respons juga
+  memuat `column_totals` + `numeric_columns` + `headers` supaya editor di layar menghitung ulang dengan rumus yang
+  sama (`compute_values` ⇄ `computeValues`). UI: tabel kolom → field (select), badge "pemetaan tersimpan ✓" /
+  "tebakan otomatis — periksa"; pemetaan disimpan otomatis saat pencairan hasil impor DISIMPAN.
+- **Filter periode** daftar pencairan: bulan (YYYY-MM) ATAU rentang tanggal (memakai `date_from/date_to` yang
+  sudah ada); kartu per toko mengikuti bulan yang dipilih.
+- **IA Keuangan v3** (`portalNav.js`, disetujui pemilik): RINGKASAN & LAPORAN · PENJUALAN & PENERIMAAN (Pencairan
+  Marketplace, Aging Piutang, Peta Akun Channel) · KAS & BANK (+Prediksi Kas) · PENGELUARAN & KARYAWAN (Pengeluaran
+  & Klaim, Kasbon & Pinjaman, Penyelesaian Perjalanan Dinas) · AKUNTANSI (Jurnal, Penyesuaian Akhir Periode,
+  Persetujuan Perubahan Invoice, Master Akuntansi) · ANGGARAN, BIAYA & ASET. `FinanceDashboard` akses cepat
+  diselaraskan ke 6 grup yang sama. Guard INV-NAV-01 hijau. Diuji iteration_100 (8/8 backend + UI lulus).
+
 ## Session log — Fase 2 FIX: State machine enforcement + verifikasi RBAC live (Feb 2026)
 Temuan verifikasi independen user: PO Draft bisa langsung Closed via /status (200).
 - **Keputusan: BUG-FIX (kategori C-1..M-3), bukan port** — referensi sommerville-adopt sendiri hanya

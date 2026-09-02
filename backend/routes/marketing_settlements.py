@@ -54,7 +54,7 @@ import uuid
 from datetime import date, datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from auth import require_auth
@@ -245,14 +245,29 @@ async def coa_map(request: Request):
     return {"ok": True, "coa": out,
             "missing": [o["code"] for o in out if not o["found"]]}
 
+MAPS_COLL = "marketing_settlement_import_maps"
+
+
+class ImportMappingIn(BaseModel):
+    account_id: str
+    headers: List[str]
+    mapping: dict                      # field -> [kolom]
+    meta_columns: Optional[dict] = None
+    filename: Optional[str] = ""
+
+
 @router.post("/import/preview")
-async def import_preview(request: Request, file: UploadFile = File(...)):
+async def import_preview(request: Request, file: UploadFile = File(...),
+                         account_id: str = Form(default="")):
     """Baca laporan pencairan Shopee/TikTok → DRAF angka form. TIDAK menyimpan apa pun.
 
     Aturan BD-2: pemetaan kolom tidak boleh ditebak diam-diam — respons menyebut kolom
     sumber tiap field dan kolom angka yang TIDAK terpetakan, lalu staf memeriksa di form.
+    Bila toko ini pernah MENGONFIRMASI pemetaan untuk format header yang sama, pemetaan
+    itu dipakai (`mapping_source: saved`) — tebakan hanya untuk format yang belum dikenal.
     """
     await _require_finance(request)
+    db = get_db()
     raw = await file.read()
     if not raw:
         raise HTTPException(400, "Berkas kosong.")
@@ -261,15 +276,25 @@ async def import_preview(request: Request, file: UploadFile = File(...)):
     fname = file.filename or "laporan.csv"
     if not fname.lower().endswith((".csv", ".xlsx", ".xls", ".xlsm", ".tsv", ".txt")):
         raise HTTPException(415, "Hanya CSV atau Excel (.xlsx) yang didukung.")
-    try:
-        parsed = _simport.parse_settlement_report(raw, fname)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("import pencairan gagal dibaca: %s", e)
-        raise HTTPException(400, f"Berkas tidak bisa dibaca: {e}")
+
+    async def _parse(saved=None):
+        try:
+            return _simport.parse_settlement_report(raw, fname, saved_mapping=saved)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("import pencairan gagal dibaca: %s", e)
+            raise HTTPException(400, f"Berkas tidak bisa dibaca: {e}")
+
+    parsed = await _parse()
+    saved_doc = None
+    if account_id:
+        saved_doc = await db[MAPS_COLL].find_one(
+            {"account_id": account_id, "fingerprint": parsed["fingerprint"]}, {"_id": 0})
+        if saved_doc:
+            parsed = await _parse(saved_doc.get("mapping") or {})
     parsed["platform_guess"] = _simport.guess_platform(parsed["headers"])
-    parsed.pop("headers", None)
+    parsed["saved_mapping"] = _ser(saved_doc) if saved_doc else None
     draft = dict(parsed["values"])
     draft["expected_net_payout"] = round(sum(sign * float(draft.get(f) or 0)
                                              for f, sign in MONEY_FIELDS.items()), 2)
@@ -279,6 +304,51 @@ async def import_preview(request: Request, file: UploadFile = File(...)):
                  "diunggah adalah laporan Penghasilan (Shopee) / Settlement (TikTok), bukan "
                  "ekspor pesanan.")
     return {"ok": True, **parsed, "draft": draft}
+
+
+@router.post("/import/mapping")
+async def save_import_mapping(body: ImportMappingIn, request: Request):
+    """Simpan pemetaan kolom yang DIKONFIRMASI staf untuk (toko, sidik format header)."""
+    user = await _require_finance(request)
+    db = get_db()
+    await _scope.require_account(db, body.account_id)
+    valid_fields = set(_simport.FIELD_KEYWORDS)
+    mapping = {f: [str(c) for c in cols] for f, cols in (body.mapping or {}).items()
+               if f in valid_fields and cols}
+    if not mapping:
+        raise HTTPException(400, "Pemetaan kosong — minimal satu kolom harus dipetakan.")
+    fp = _simport._fingerprint(body.headers)
+    now = _now()
+    doc = {
+        "account_id": body.account_id, "fingerprint": fp, "headers": body.headers,
+        "mapping": mapping, "meta_columns": body.meta_columns or {},
+        "filename": body.filename or "", "updated_at": now,
+        "updated_by": user.get("email") if isinstance(user, dict) else None,
+    }
+    res = await db[MAPS_COLL].update_one(
+        {"account_id": body.account_id, "fingerprint": fp},
+        {"$set": doc, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}}, upsert=True)
+    saved = await db[MAPS_COLL].find_one({"account_id": body.account_id, "fingerprint": fp}, {"_id": 0})
+    return {"ok": True, "created": bool(res.upserted_id), "data": _ser(saved)}
+
+
+@router.get("/import/mapping")
+async def list_import_mappings(request: Request, account_id: str = Query(default="")):
+    await require_auth(request)
+    db = get_db()
+    q = {"account_id": account_id} if account_id else {}
+    rows = await db[MAPS_COLL].find(q, {"_id": 0}).sort("updated_at", -1).to_list(200)
+    return {"ok": True, "data": [_ser(r) for r in rows]}
+
+
+@router.delete("/import/mapping/{map_id}")
+async def delete_import_mapping(map_id: str, request: Request):
+    await _require_finance(request)
+    db = get_db()
+    res = await db[MAPS_COLL].delete_one({"id": map_id})
+    if not res.deleted_count:
+        raise HTTPException(404, "Pemetaan tidak ditemukan.")
+    return {"ok": True}
 
 
 @router.get("/by-account")

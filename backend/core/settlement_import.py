@@ -99,7 +99,26 @@ def _date_range(rows: List[dict], col: str) -> Tuple[Optional[str], Optional[str
     return (min(ds), max(ds)) if ds else (None, None)
 
 
-def parse_settlement_report(raw: bytes, filename: str) -> Dict[str, Any]:
+def _fingerprint(headers: List[str]) -> str:
+    import hashlib
+    key = "|".join(sorted(_norm_header(h) for h in headers if _norm_header(h)))
+    return hashlib.sha1(key.encode()).hexdigest()[:16]
+
+
+def compute_values(mapping: Dict[str, List[str]], column_totals: Dict[str, float]) -> Dict[str, float]:
+    """Angka per field dari peta kolom + total per kolom. Dipakai server DAN dapat
+    ditiru layar (klien menerima `column_totals`) supaya editor pemetaan menghitung sama."""
+    values: Dict[str, float] = {}
+    for field in FIELD_KEYWORDS:
+        total = sum(float(column_totals.get(c) or 0) for c in (mapping.get(field) or []))
+        # Platform menulis potongan sebagai angka negatif; form F9 memakai nilai positif
+        # dengan arah yang sudah baku — kecuali `adjustments` yang boleh minus.
+        values[field] = round(total if field == "adjustments" else abs(total), 2)
+    return values
+
+
+def parse_settlement_report(raw: bytes, filename: str,
+                            saved_mapping: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
     headers, rows = parse_table(raw, filename)
     if not headers:
         raise ValueError("Baris header tidak ditemukan di berkas")
@@ -109,6 +128,7 @@ def parse_settlement_report(raw: bytes, filename: str) -> Dict[str, Any]:
     mapping: Dict[str, List[str]] = {f: [] for f in FIELD_KEYWORDS}
     used: set = set()
     date_col = period_col = id_col = None
+    numeric_cols: List[str] = []
 
     for h in headers:
         norm = _norm_header(h)
@@ -124,6 +144,7 @@ def parse_settlement_report(raw: bytes, filename: str) -> Dict[str, Any]:
             continue
         if not _is_numeric_column(rows, h):
             continue
+        numeric_cols.append(h)
         for field in FIELD_PRIORITY:
             if _match(norm, FIELD_KEYWORDS[field]):
                 mapping[field].append(h); used.add(h)
@@ -134,17 +155,22 @@ def parse_settlement_report(raw: bytes, filename: str) -> Dict[str, Any]:
         if h in mapping["affiliate_commission"]:
             mapping["ads_deduction"].remove(h)
 
-    values: Dict[str, float] = {}
-    for field, cols in mapping.items():
-        total = sum(_sum_column(rows, c) for c in cols)
-        # Platform menulis potongan sebagai angka negatif; form F9 memakai nilai positif
-        # dengan arah yang sudah baku — kecuali `adjustments` yang boleh minus.
-        values[field] = round(total if field == "adjustments" else abs(total), 2)
+    column_totals = {c: round(_sum_column(rows, c), 2) for c in numeric_cols}
 
-    unmapped = [h for h in headers if h not in used and _norm_header(h)
-                and not any(t in _norm_header(h) for t in EXCLUDE_TOKENS)
-                and not _is_id_column(_norm_header(h))
-                and _is_numeric_column(rows, h)][:MAX_UNMAPPED]
+    mapping_source = "auto"
+    if saved_mapping:
+        # Pemetaan yang sudah DIKONFIRMASI staf untuk format ini menang atas tebakan —
+        # hanya kolom yang benar-benar ada di berkas yang dipakai.
+        confirmed = {f: [c for c in cols if c in column_totals]
+                     for f, cols in saved_mapping.items() if f in FIELD_KEYWORDS}
+        if any(confirmed.values()):
+            mapping = {f: confirmed.get(f, []) for f in FIELD_KEYWORDS}
+            used = set(used) | {c for cols in mapping.values() for c in cols}
+            mapping_source = "saved"
+
+    values = compute_values(mapping, column_totals)
+    unmapped = [c for c in numeric_cols
+                if not any(c in cols for cols in mapping.values())][:MAX_UNMAPPED]
 
     settlement_date = None
     if date_col:
@@ -162,6 +188,10 @@ def parse_settlement_report(raw: bytes, filename: str) -> Dict[str, Any]:
         "period_from": period_from,
         "period_to": period_to,
         "mapping": {f: cols for f, cols in mapping.items() if cols},
+        "mapping_source": mapping_source,
+        "fingerprint": _fingerprint(headers),
+        "column_totals": column_totals,
+        "numeric_columns": numeric_cols,
         "meta_columns": {"settlement_date": date_col, "period": period_col, "settlement_id": id_col},
         "unmapped_numeric_columns": unmapped,
         "headers": headers,
