@@ -122,8 +122,24 @@ See `/app/memory/test_credentials.md` (admin@garment.com / Admin@123).
   marketing. URL publik tetap `/api/uploads/<path>` (route baru di `server.py`, fallback ke berkas lama di
   `/app/uploads`). Staging unggah backup/restore pindah ke direktori temp sistem. Diverifikasi: upload dokumen
   cuti → tersimpan → dilayani kembali 200 image/jpeg.
-- Backlog berikutnya: impor CSV laporan pencairan Shopee/TikTok (isi otomatis rincian potongan), tautan mutasi
-  bank (fin-bank-recon) → pencairan, filter periode/bulan di daftar pencairan.
+- Backlog berikutnya: tautan mutasi bank (fin-bank-recon) → pencairan, filter periode/bulan di daftar pencairan.
+
+### 2026-09-02 (lanjutan) — Impor laporan pencairan + Ringkasan per toko
+- `POST /api/marketing/settlements/import/preview` (multipart, finance-only): baca CSV/XLSX laporan
+  Penghasilan Shopee / Settlement TikTok → `values` per field F9 + `mapping` (kolom sumber) +
+  `unmapped_numeric_columns` + tanggal/periode/settlement_id + `platform_guess`. **Tidak menyimpan
+  apa pun** — hanya mengisi form; staf memeriksa lalu Simpan (patuh BD-2: pemetaan terlihat, bukan ditebak
+  diam-diam). Parser: `backend/core/settlement_import.py` (kata kunci per field, prioritas afiliasi > komisi,
+  potongan dibaca sebagai nilai absolut; `adjustments` boleh minus). Contoh berkas:
+  `samples/settlement_shopee_contoh.csv`, `samples/settlement_tiktok_contoh.xlsx`.
+- `GET /api/marketing/settlements/by-account?month=YYYY-MM`: per toko — jumlah, bruto, cair, % potongan
+  total / komisi / iklan / refund, belum seimbang; `months` tersedia; default bulan terakhir yang ada data.
+- UI (`FinanceSettlementModule`): tombol **Impor laporan** (`fin-settlement-import`), panel hasil baca
+  (`SettlementImportPanel.jsx`), kartu **Potongan per toko** dengan navigasi bulan (`SettlementByStoreCards.jsx`).
+  Toko dipilih ULANG tiap impor dari `platform_guess` (bug iterasi 99: impor kedua mewarisi toko impor pertama);
+  Simpan ditolak bila platform laporan ≠ platform toko yang dipilih.
+- PENTING: frontend di env ini dilayani sebagai bundel statis (`static_server.js`) — setelah ubah `frontend/src`
+  WAJIB `bash /app/scripts/rebuild_frontend.sh` (lihat `memory/PREVIEW_STABLE_MODE.md`).
 
 ## Session log — Fase 2 FIX: State machine enforcement + verifikasi RBAC live (Feb 2026)
 Temuan verifikasi independen user: PO Draft bisa langsung Closed via /status (200).

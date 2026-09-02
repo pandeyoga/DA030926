@@ -18,15 +18,17 @@
  *     tombolnya menolak dengan alasan yang bisa ditindaklanjuti — tidak diam-diam
  *     memakai rekening bawaan.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Banknote, RefreshCw, AlertTriangle, CheckCircle2, Loader2, Store, Percent,
-  Plus, Scale, BookCheck, Send, X, Trash2, Pencil,
+  Plus, Scale, BookCheck, Send, X, Trash2, Pencil, Upload,
 } from 'lucide-react';
 import { GlassCard } from '@/components/ui/glass';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
 import { formatRupiah } from '@/lib/format';
+import { SettlementImportPanel } from './SettlementImportPanel';
+import { SettlementByStoreCards } from './SettlementByStoreCards';
 
 const API = process.env.REACT_APP_BACKEND_URL;
 const BASE = `${API}/api/marketing/settlements`;
@@ -106,6 +108,10 @@ export default function FinanceSettlementModule() {
   const [recon, setRecon] = useState(null);
   const [reconFor, setReconFor] = useState('');
 
+  const [importRes, setImportRes] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const fileRef = useRef(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -114,6 +120,7 @@ export default function FinanceSettlementModule() {
       const d = await call(`?${qs}`);
       setRows(d.data || []);
       setSummary(d.summary || null);
+      setRefreshKey((k) => k + 1);
     } catch (e) {
       toast.error(e.message);
     } finally {
@@ -145,6 +152,47 @@ export default function FinanceSettlementModule() {
     [form.net_payout, expected]);
 
   const openCreate = () => { setForm(EMPTY); setEditId(''); setFormOpen(true); };
+
+  const importFile = async (file) => {
+    if (!file) return;
+    setBusy('import');
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch(`${BASE}/import/preview`, {
+        method: 'POST', headers: { Authorization: `Bearer ${token()}` }, body: fd,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || `Gagal membaca berkas (HTTP ${r.status})`);
+      const guess = d.platform_guess || '';
+      const fits = (id) => id && (!guess || accOf(id).platform === guess);
+      // Toko dipilih ULANG tiap impor dari platform yang terdeteksi — jangan mewarisi
+      // pilihan impor sebelumnya, karena laporan TikTok bisa diam-diam tersimpan ke toko Shopee.
+      let account_id = '';
+      if (fits(accountId)) account_id = accountId;
+      else if (fits(form.account_id)) account_id = form.account_id;
+      else if (guess) {
+        const cand = accounts.filter((a) => a.platform === guess);
+        if (cand.length === 1) account_id = cand[0].id;
+      }
+      const f = { ...EMPTY, account_id };
+      MONEY_FIELDS.forEach(([k]) => { f[k] = d.values?.[k] ? String(d.values[k]) : ''; });
+      f.net_payout = d.values?.net_payout ? String(d.values.net_payout) : '';
+      f.settlement_id = d.settlement_id || '';
+      f.settlement_date = d.settlement_date || '';
+      f.period_from = d.period_from || '';
+      f.period_to = d.period_to || '';
+      f.notes = `Diimpor dari ${d.filename} (${d.row_count} baris)`;
+      setForm(f); setEditId(''); setFormOpen(true); setImportRes(d);
+      if (!account_id) toast.warning(`Toko belum dipilih — laporan terdeteksi ${guess || 'tanpa platform'}; pilih toko yang benar sebelum menyimpan.`);
+      toast.success(`${Object.keys(d.mapping || {}).length} field terisi dari laporan — periksa lalu simpan.`);
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy('');
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  };
   const openEdit = (r) => {
     const f = { ...EMPTY };
     Object.keys(EMPTY).forEach((k) => { f[k] = r[k] ?? ''; });
@@ -155,6 +203,11 @@ export default function FinanceSettlementModule() {
     if (!form.account_id) { toast.error('Pilih toko dulu.'); return; }
     if (!form.settlement_id.trim()) { toast.error('Nomor pencairan wajib diisi.'); return; }
     if (!form.settlement_date) { toast.error('Tanggal uang masuk wajib diisi.'); return; }
+    if (importRes?.platform_guess && accOf(form.account_id).platform
+        && accOf(form.account_id).platform !== importRes.platform_guess) {
+      toast.error(`Laporan terdeteksi ${importRes.platform_guess}, tetapi toko yang dipilih ada di ${accOf(form.account_id).platform}. Pilih toko yang sesuai.`);
+      return;
+    }
     const body = { ...form, platform: accOf(form.account_id).platform || form.platform || '' };
     MONEY_FIELDS.forEach(([f]) => { body[f] = parseFloat(form[f]) || 0; });
     body.net_payout = parseFloat(form.net_payout) || 0;
@@ -167,6 +220,7 @@ export default function FinanceSettlementModule() {
         ? 'Pencairan tersimpan dan angkanya seimbang.'
         : `Tersimpan, tetapi masih ada selisih ${rp(d.data?.net_payout_diff || 0)} — beri nama dulu sebelum dijurnal.`);
       setFormOpen(false);
+      setImportRes(null);
       await load();
     } catch (e) {
       toast.error(e.message);
@@ -229,6 +283,16 @@ export default function FinanceSettlementModule() {
             className="h-9 px-3 rounded-lg bg-foreground/5 hover:bg-foreground/10 text-sm flex items-center gap-1.5">
             <RefreshCw className="w-4 h-4" /> Muat ulang
           </button>
+          <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.tsv" className="hidden"
+            data-testid="fin-settlement-import-file"
+            onChange={(e) => importFile(e.target.files?.[0])} />
+          <button data-testid="fin-settlement-import" disabled={busy === 'import'}
+            onClick={() => fileRef.current?.click()}
+            title="Unggah laporan Penghasilan (Shopee) / Settlement (TikTok) untuk mengisi form"
+            className="h-9 px-3 rounded-lg bg-foreground/5 hover:bg-foreground/10 text-sm flex items-center gap-1.5 disabled:opacity-50">
+            {busy === 'import' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+            Impor laporan
+          </button>
           <button data-testid="fin-settlement-new" onClick={openCreate}
             className="h-9 px-3 rounded-lg bg-primary text-primary-foreground text-sm flex items-center gap-1.5">
             <Plus className="w-4 h-4" /> Catat pencairan
@@ -250,6 +314,9 @@ export default function FinanceSettlementModule() {
           tone={(summary?.unverified_count || 0) > 0 ? 'bad' : 'good'}
           hint="selisih belum diberi nama — belum boleh dijurnal" />
       </div>
+
+      {/* ── HASIL IMPOR ── */}
+      <SettlementImportPanel result={importRes} onClose={() => setImportRes(null)} />
 
       {/* ── FORM ── */}
       {formOpen ? (
@@ -418,6 +485,9 @@ export default function FinanceSettlementModule() {
           </ul>
         </GlassCard>
       ) : null}
+
+      {/* ── PER TOKO ── */}
+      <SettlementByStoreCards refreshKey={refreshKey} />
 
       {/* ── DAFTAR ── */}
       <GlassCard className="p-0 overflow-hidden">

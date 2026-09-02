@@ -49,15 +49,17 @@ Kolom mengikuti spesifikasi F9.1 (`RENCANA_EKSEKUSI_MASTER` §F9), dan dedupe
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import date, datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from auth import require_auth
 from core import marketing_account_scope as _scope
+from core import settlement_import as _simport
 from database import get_db
 from routes.shared import require_portal
 
@@ -242,6 +244,104 @@ async def coa_map(request: Request):
                     "found": bool(acc and acc.get("active"))})
     return {"ok": True, "coa": out,
             "missing": [o["code"] for o in out if not o["found"]]}
+
+@router.post("/import/preview")
+async def import_preview(request: Request, file: UploadFile = File(...)):
+    """Baca laporan pencairan Shopee/TikTok → DRAF angka form. TIDAK menyimpan apa pun.
+
+    Aturan BD-2: pemetaan kolom tidak boleh ditebak diam-diam — respons menyebut kolom
+    sumber tiap field dan kolom angka yang TIDAK terpetakan, lalu staf memeriksa di form.
+    """
+    await _require_finance(request)
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "Berkas kosong.")
+    if len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(413, "Berkas melebihi 15 MB.")
+    fname = file.filename or "laporan.csv"
+    if not fname.lower().endswith((".csv", ".xlsx", ".xls", ".xlsm", ".tsv", ".txt")):
+        raise HTTPException(415, "Hanya CSV atau Excel (.xlsx) yang didukung.")
+    try:
+        parsed = _simport.parse_settlement_report(raw, fname)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("import pencairan gagal dibaca: %s", e)
+        raise HTTPException(400, f"Berkas tidak bisa dibaca: {e}")
+    parsed["platform_guess"] = _simport.guess_platform(parsed["headers"])
+    parsed.pop("headers", None)
+    draft = dict(parsed["values"])
+    draft["expected_net_payout"] = round(sum(sign * float(draft.get(f) or 0)
+                                             for f, sign in MONEY_FIELDS.items()), 2)
+    if not parsed["mapping"]:
+        raise HTTPException(
+            400, "Tidak ada satu pun kolom uang yang dikenali di berkas ini. Pastikan yang "
+                 "diunggah adalah laporan Penghasilan (Shopee) / Settlement (TikTok), bukan "
+                 "ekspor pesanan.")
+    return {"ok": True, **parsed, "draft": draft}
+
+
+@router.get("/by-account")
+async def summary_by_account(request: Request, month: str = Query(default="")):
+    """Ringkasan per toko untuk satu bulan (YYYY-MM) — bandingkan % potongan antar toko."""
+    user = await require_auth(request)
+    db = get_db()
+    q: dict = {}
+    vis = await _scope.visible_account_ids(db, user)
+    if vis is not None:
+        q["account_id"] = {"$in": vis}
+
+    months_raw = await db[COLL].aggregate([
+        {"$match": q},
+        {"$group": {"_id": {"$substr": ["$settlement_date", 0, 7]}}},
+        {"$sort": {"_id": -1}},
+    ]).to_list(60)
+    months = [m["_id"] for m in months_raw if m.get("_id")]
+    if month and not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise HTTPException(400, "Format bulan harus YYYY-MM")
+    month = month or (months[0] if months else date.today().strftime("%Y-%m"))
+
+    rows = await db[COLL].aggregate([
+        {"$match": {**q, "settlement_date": {"$regex": f"^{month}"}}},
+        {"$group": {"_id": "$account_id",
+                    "platform": {"$first": "$platform"},
+                    "count": {"$sum": 1},
+                    "gross": {"$sum": "$gross_sales"},
+                    "net": {"$sum": "$net_payout"},
+                    "ded": {"$sum": "$total_deductions"},
+                    "refunds": {"$sum": "$refunds"},
+                    "ads": {"$sum": "$ads_deduction"},
+                    "commission": {"$sum": {"$add": ["$platform_commission", "$platform_service_fee"]}},
+                    "unverified": {"$sum": {"$cond": [{"$eq": ["$math_verified", False]}, 1, 0]}}}},
+    ]).to_list(200)
+    acc_ids = [r["_id"] for r in rows]
+    accounts = {a["id"]: a for a in await db.marketing_platform_accounts.find(
+        {"id": {"$in": acc_ids}}, {"_id": 0, "id": 1, "account_name": 1, "platform": 1}).to_list(200)}
+    out = []
+    for r in rows:
+        gross = float(r.get("gross") or 0)
+        ded = float(r.get("ded") or 0)
+        out.append({
+            "account_id": r["_id"],
+            "account_name": accounts.get(r["_id"], {}).get("account_name") or r["_id"],
+            "platform": accounts.get(r["_id"], {}).get("platform") or r.get("platform"),
+            "count": r["count"],
+            "gross_sales": round(gross, 2),
+            "net_payout": round(float(r.get("net") or 0), 2),
+            "total_deductions": round(ded, 2),
+            "deduction_pct": round(ded / gross * 100, 2) if gross else 0.0,
+            "commission_pct": round(float(r.get("commission") or 0) / gross * 100, 2) if gross else 0.0,
+            "ads_pct": round(float(r.get("ads") or 0) / gross * 100, 2) if gross else 0.0,
+            "refund_pct": round(float(r.get("refunds") or 0) / gross * 100, 2) if gross else 0.0,
+            "unverified_count": r.get("unverified", 0),
+        })
+    out.sort(key=lambda x: -x["deduction_pct"])
+    tot_gross = sum(o["gross_sales"] for o in out)
+    tot_ded = sum(o["total_deductions"] for o in out)
+    return {"ok": True, "month": month, "months": months, "data": out,
+            "average_deduction_pct": round(tot_ded / tot_gross * 100, 2) if tot_gross else 0.0}
+
+
 
 
 @router.get("")
