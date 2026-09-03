@@ -131,6 +131,14 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
       }));
       setForm(f => ({...f, po_id: poId, items, source_receipt_ids: []}));
       resetCapacity();
+      // PO INTERNAL: tidak lewat CMT — kapasitas kirim = hasil produksi job internal
+      // (dibaca dari backend per po_item), tanpa pemilih CMT Receipt.
+      if (po && po.business_type === 'internal') {
+        setAvailableReceipts([]);
+        const map = await fetchCapacityByPoItems(items.map(i => i.po_item_id));
+        setForm(f => ({ ...f, items: annotateItemsWithCapacity(items, map) }));
+        return;
+      }
       // Phase B: fetch Approved cmt_receipts for this PO to enforce source_receipt_ids picker
       try {
         const rcpAll = await apiGet(`/prod/cmt-receipts?status=Approved`);
@@ -166,6 +174,25 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
     } finally { setCapLoading(false); }
   };
 
+  const fetchCapacityByPoItems = async (poItemIds) => {
+    const ids = (poItemIds || []).filter(Boolean);
+    if (ids.length === 0) { resetCapacity(); return {}; }
+    setCapLoading(true);
+    try {
+      const res = await apiGet(
+        `/buyer-dispatch-capacity?with_fg_stock=1&po_item_ids=${encodeURIComponent(ids.join(','))}`);
+      const map = {};
+      for (const r of (res?.items || [])) map[r.key] = r;
+      setCapRows(map);
+      setCapTotals(res?.totals || null);
+      return map;
+    } catch (e) {
+      toast.error(`Gagal memuat sisa bisa kirim: ${e.message || 'kesalahan jaringan'}`);
+      resetCapacity();
+      return {};
+    } finally { setCapLoading(false); }
+  };
+
   // Baris item DIBANGUN dari kapasitas (mode gabungan): hanya item yang benar-benar
   // punya penerimaan dari CMT yang muncul, dan qty di-prefill = SISA (bukan cap penuh).
   const rowsFromCapacity = (map) => Object.values(map)
@@ -182,6 +209,7 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
       ordered_qty: r.ordered || 0,
       good_from_cmt: r.good_from_cmt || 0,
       reworked_ok: r.reworked_ok || 0,
+      internal_produced: r.internal_produced || 0,
       dispatched: r.dispatched || 0,
       shippable: r.shippable || 0,
       fg_stock: r.fg_stock,
@@ -191,11 +219,12 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
   // Mode satu-PO: baris tetap dari PO items, tapi angkanya DILENGKAPI kapasitas.
   const annotateItemsWithCapacity = (items, map) => items.map(it => {
     const r = map[`poi:${it.po_item_id}`];
-    if (!r) return { ...it, good_from_cmt: 0, reworked_ok: 0, dispatched: 0, shippable: 0, qty_shipped: '' };
+    if (!r) return { ...it, good_from_cmt: 0, reworked_ok: 0, internal_produced: 0, dispatched: 0, shippable: 0, qty_shipped: '' };
     return {
       ...it,
       good_from_cmt: r.good_from_cmt || 0,
       reworked_ok: r.reworked_ok || 0,
+      internal_produced: r.internal_produced || 0,
       dispatched: r.dispatched || 0,
       shippable: r.shippable || 0,
       fg_stock: r.fg_stock,
@@ -406,13 +435,13 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
   const exportOutstandingCSV = () => {    const rows = outstanding.items || [];
     if (rows.length === 0) { toast.error('Tidak ada data untuk diunduh'); return; }
     const head = ['No. PO', 'Buyer', 'SKU', 'Produk', 'Size', 'Warna', 'Qty Order',
-      'Lolos QC', 'Hasil Permak', 'Sudah Dikirim', 'Sisa Order', 'Sisa Bisa Kirim', 'Stok FG'];
+      'Sumber', 'Siap Kirim', 'Hasil Permak', 'Sudah Dikirim', 'Sisa Order', 'Sisa Bisa Kirim', 'Stok FG'];
     const esc = (v) => {
       const s = v == null ? '' : String(v);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
     const body = rows.map(r => [r.po_number, r.buyer, r.sku, r.product_name, r.size, r.color,
-      r.ordered, r.good_from_cmt, r.reworked_ok, r.dispatched, r.remaining_vs_order,
+      r.ordered, r.source === 'internal' ? 'produksi internal' : 'CMT', r.source === 'internal' ? r.internal_produced : r.good_from_cmt, r.reworked_ok, r.dispatched, r.remaining_vs_order,
       r.shippable, r.fg_stock == null ? '' : Math.round(r.fg_stock)].map(esc).join(','));
     const csv = [head.join(','), ...body].join('\n');
     const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' }));
@@ -462,7 +491,9 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
     const validItems = form.items.filter(i => Number(i.qty_shipped) > 0);
     if (validItems.length === 0) { toast.error('Isi minimal 1 item dengan qty > 0'); return; }
     // Phase B: DA dispatch wajib pilih source_receipt_ids (approved cmt_receipts)
-    if (form.source_receipt_ids.length === 0) {
+    // — kecuali PO INTERNAL (sumber = hasil produksi job internal).
+    const isInternalPO = selectedPO?.business_type === 'internal';
+    if (!isInternalPO && form.source_receipt_ids.length === 0) {
       toast.error(
         'Phase B: wajib pilih minimal 1 CMT Receipt (Approved) sebagai sumber. ' +
         'Belum ada CMT Receipt yg approved? Minta DA admin proses "Terima FG dari CMT" dulu.'
@@ -993,7 +1024,7 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
               <div>
                 <h2 className="text-lg font-semibold text-foreground">Kekurangan Kirim ke Buyer</h2>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  Item yang belum habis dikirim. <strong>Sisa Bisa Kirim</strong> = lolos QC + hasil permak − sudah dikirim.
+                  Item yang belum habis dikirim. <strong>Sisa Bisa Kirim</strong> = siap kirim (maklon: lolos QC + hasil permak · internal: hasil produksi) − sudah dikirim.
                   Kalau sisa 0 tetapi Sisa Order masih ada, barangnya belum diterima dari CMT.
                 </p>
               </div>
@@ -1137,7 +1168,7 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
                     <th className="text-left px-3 py-2 text-xs text-muted-foreground">Produk</th>
                     <th className="text-left px-3 py-2 text-xs text-muted-foreground">Size/Warna</th>
                     <th className="text-right px-3 py-2 text-xs text-muted-foreground">Order</th>
-                    <th className="text-right px-3 py-2 text-xs text-muted-foreground">Lolos QC</th>
+                    <th className="text-right px-3 py-2 text-xs text-muted-foreground" title="Maklon: lolos QC penerimaan CMT · Internal: hasil produksi job">Siap Kirim</th>
                     <th className="text-right px-3 py-2 text-xs text-muted-foreground">Permak</th>
                     <th className="text-right px-3 py-2 text-xs text-muted-foreground">Dikirim</th>
                     <th className="text-right px-3 py-2 text-xs text-muted-foreground">Sisa Order</th>
@@ -1155,17 +1186,23 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
                       <td className="px-3 py-2 text-foreground/90">{r.product_name || '-'}</td>
                       <td className="px-3 py-2 text-muted-foreground">{r.size || '-'}/{r.color || '-'}</td>
                       <td className="px-3 py-2 text-right text-muted-foreground">{fmtNum(r.ordered)}</td>
-                      <td className="px-3 py-2 text-right text-foreground/80">{fmtNum(r.good_from_cmt)}</td>
-                      <td className="px-3 py-2 text-right text-emerald-700">{r.reworked_ok ? `+${fmtNum(r.reworked_ok)}` : '0'}</td>
+                      <td className="px-3 py-2 text-right text-foreground/80">
+                        {r.source === 'internal'
+                          ? <span title="Hasil produksi internal">{fmtNum(r.internal_produced)} <span className="text-[10px] text-blue-700 font-semibold">produksi</span></span>
+                          : <span title="Lolos QC penerimaan dari CMT">{fmtNum(r.good_from_cmt)} <span className="text-[10px] text-muted-foreground">QC</span></span>}
+                      </td>
+                      <td className="px-3 py-2 text-right text-emerald-700">{r.source === 'internal' ? '—' : (r.reworked_ok ? `+${fmtNum(r.reworked_ok)}` : '0')}</td>
                       <td className="px-3 py-2 text-right text-amber-700">{fmtNum(r.dispatched)}</td>
                       <td className="px-3 py-2 text-right font-semibold text-foreground">{fmtNum(r.remaining_vs_order)}</td>
                       <td className="px-3 py-2 text-right">
                         {r.shippable > 0
                           ? <span className="font-bold text-emerald-700" data-testid={`outstanding-shippable-${r.sku || r.key}`}>{fmtNum(r.shippable)}</span>
-                          : <span className="text-xs text-muted-foreground" title="Barang belum diterima dari CMT">belum ada barang</span>}
+                          : <span className="text-xs text-muted-foreground" title={r.source === 'internal' ? 'Belum ada hasil produksi' : 'Barang belum diterima dari CMT'}>belum ada barang</span>}
                       </td>
                       <td className="px-3 py-2 text-right text-muted-foreground">
-                        {r.fg_stock == null ? '—' : fmtNum(Math.round(r.fg_stock))}
+                        {r.fg_stock == null
+                          ? <span title="Master FG untuk SKU ini belum ada di gudang (bukan stok 0)">—</span>
+                          : fmtNum(Math.round(r.fg_stock))}
                       </td>
                     </tr>
                   ))}
@@ -1330,6 +1367,7 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
             <div>
               <label className="block text-sm font-medium text-foreground/90 mb-1">Pilih PO *</label>
               <SmartNativeSelect className="w-full border border-border rounded-lg px-3 py-2 text-sm disabled:opacity-60"
+                data-testid="buyer-shipment-po-select"
                 disabled={!!continueShip}
                 value={form.po_id} onChange={e => loadPOItems(e.target.value)}>
                 <option value="">-- Pilih PO --</option>
@@ -1394,8 +1432,18 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
               </div>
             )}
 
+            {!consolidate && form.po_id && selectedPO?.business_type === 'internal' && (
+              <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900" data-testid="internal-dispatch-info">
+                <div className="text-sm font-semibold">PO Produksi Internal — sumber kirim = hasil produksi</div>
+                Tidak perlu CMT Receipt. Batas qty kirim = <strong>hasil produksi job internal − sudah dikirim</strong>;
+                stok FG gudang (hasil scan-in) tetap menjadi pagar terakhir saat Simpan.
+                {capLoading ? ' Menghitung sisa bisa kirim…'
+                  : capTotals ? <> Sisa bisa kirim <strong>{Number(capTotals.shippable || 0).toLocaleString('id-ID')} pcs</strong> (diproduksi {Number(capTotals.internal_produced || 0).toLocaleString('id-ID')} − sudah dikirim {Number(capTotals.dispatched || 0).toLocaleString('id-ID')}).</>
+                  : null}
+              </div>
+            )}
             {/* Phase B: source_receipt_ids picker (DA dispatch wajib punya CMT Receipt Approved) */}
-            {!consolidate && form.po_id && (
+            {!consolidate && form.po_id && selectedPO?.business_type !== 'internal' && (
               <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 space-y-2">
                 <div className="flex items-start gap-2">
                   <ClipboardCheck className="w-4 h-4 mt-0.5 text-emerald-700" />
@@ -1461,7 +1509,9 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
                     punya cara memeriksa kenapa angkanya begitu. */}
                 <div className="flex items-center justify-between gap-2 flex-wrap text-xs">
                   <span className="text-muted-foreground" data-testid="dispatch-capacity-formula">
-                    Sisa bisa kirim = <strong>lolos QC</strong> + <strong>hasil permak</strong> − <strong>sudah dikirim</strong>
+                    {selectedPO?.business_type === 'internal'
+                      ? <>Sisa bisa kirim = <strong>hasil produksi</strong> − <strong>sudah dikirim</strong></>
+                      : <>Sisa bisa kirim = <strong>lolos QC</strong> + <strong>hasil permak</strong> − <strong>sudah dikirim</strong></>}
                   </span>
                   {capLoading ? (
                     <span className="text-blue-700 font-medium" data-testid="dispatch-capacity-loading">Menghitung sisa…</span>
@@ -1481,7 +1531,7 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
                       <th className="text-left px-3 py-2 text-xs text-muted-foreground">Produk</th>
                       <th className="text-left px-3 py-2 text-xs text-muted-foreground">Size/Warna</th>
                       <th className="text-right px-3 py-2 text-xs text-muted-foreground">Qty Order</th>
-                      <th className="text-right px-3 py-2 text-xs text-muted-foreground" title="Qty yang LOLOS QC saat barang diterima dari CMT (reject tidak termasuk)">Lolos QC</th>
+                      <th className="text-right px-3 py-2 text-xs text-muted-foreground" title={selectedPO?.business_type === 'internal' ? 'Qty hasil produksi job internal' : 'Qty yang LOLOS QC saat barang diterima dari CMT (reject tidak termasuk)'}>{selectedPO?.business_type === 'internal' ? 'Diproduksi' : 'Lolos QC'}</th>
                       <th className="text-right px-3 py-2 text-xs text-muted-foreground" title="Qty reject yang sudah diperbaiki (permak berhasil) sehingga boleh dikirim">Hasil Permak</th>
                       <th className="text-right px-3 py-2 text-xs text-muted-foreground" title="Total yang sudah dikirim ke buyer pada semua surat jalan">Sudah Dikirim</th>
                       <th className="text-right px-3 py-2 text-xs text-muted-foreground" title="Batas maksimal qty kirim untuk item ini">Sisa Bisa Kirim</th>
@@ -1492,6 +1542,7 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
                     {form.items.map((item, idx) => {
                       const hasCap = item.shippable != null;
                       const sisa = Number(item.shippable || 0);
+                      const notProduced = hasCap && sisa <= 0 && selectedPO?.business_type === 'internal' && Number(item.internal_produced || 0) === 0;
                       const lunas = hasCap && sisa <= 0;
                       const lowStock = hasCap && item.fg_stock != null && Number(item.fg_stock) < sisa;
                       return (
@@ -1503,7 +1554,7 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
                         <td className="px-3 py-2 text-foreground/90">{item.product_name}</td>
                         <td className="px-3 py-2 text-muted-foreground">{item.size || '-'}/{item.color || '-'}</td>
                         <td className="px-3 py-2 text-right text-muted-foreground">{Number(item.ordered_qty || 0).toLocaleString('id-ID')}</td>
-                        <td className="px-3 py-2 text-right text-foreground/80">{hasCap ? Number(item.good_from_cmt || 0).toLocaleString('id-ID') : '—'}</td>
+                        <td className="px-3 py-2 text-right text-foreground/80">{hasCap ? Number((selectedPO?.business_type === 'internal' ? item.internal_produced : item.good_from_cmt) || 0).toLocaleString('id-ID') : '—'}</td>
                         <td className="px-3 py-2 text-right text-foreground/80">
                           {hasCap && Number(item.reworked_ok || 0) > 0
                             ? <span className="text-emerald-700 font-semibold" title="Reject yang sudah diperbaiki dan sekarang boleh dikirim">+{Number(item.reworked_ok).toLocaleString('id-ID')}</span>
@@ -1512,7 +1563,7 @@ export default function BuyerShipmentModule({ userRole, hasPerm = () => false, p
                         <td className="px-3 py-2 text-right text-amber-700">{hasCap ? Number(item.dispatched || 0).toLocaleString('id-ID') : '—'}</td>
                         <td className="px-3 py-2 text-right">
                           {!hasCap ? <span className="text-muted-foreground">—</span> : lunas ? (
-                            <span className="inline-block px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-[10px] font-bold" data-testid={`dispatch-item-lunas-${item.sku || idx}`}>LUNAS</span>
+                            <span className="inline-block px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-[10px] font-bold" data-testid={`dispatch-item-lunas-${item.sku || idx}`}>{notProduced ? 'BELUM PRODUKSI' : 'LUNAS'}</span>
                           ) : (
                             <span className="font-bold text-emerald-700" data-testid={`dispatch-item-shippable-${item.sku || idx}`}>{sisa.toLocaleString('id-ID')}</span>
                           )}

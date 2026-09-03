@@ -489,16 +489,36 @@ async def compute_po_fulfillment(db, po_id: str) -> dict:
 
     total_received = sum(received_by_item.values())
     total_shipped = sum(shipped_by_item.values())
-    qty_short = max(0, total_ordered - total_received)
+
+    # PO INTERNAL: "terpenuhi" = sudah DIPRODUKSI (masuk FG) — bukan hanya yang
+    # sudah dikirim ke buyer. Tanpa ini PO dengan produksi nyata dilaporkan 100%
+    # short saat ditutup (audit iteration_102).
+    po_doc = await db.production_pos.find_one({'id': po_id}, {'_id': 0, 'business_type': 1})
+    is_internal = (po_doc or {}).get('business_type') == 'internal'
+    produced_by_item: dict = {}
+    if is_internal and item_ids:
+        async for ji in db.production_job_items.find(
+                {'po_item_id': {'$in': item_ids}}, {'_id': 0, 'po_item_id': 1, 'produced_qty': 1}):
+            poi = ji.get('po_item_id')
+            produced_by_item[poi] = produced_by_item.get(poi, 0) + int(ji.get('produced_qty', 0) or 0)
+    total_produced = sum(produced_by_item.values())
+    fulfilled_by_item = {
+        poi: max(received_by_item.get(poi, 0), produced_by_item.get(poi, 0)) for poi in item_ids
+    } if is_internal else received_by_item
+    total_fulfilled = sum(fulfilled_by_item.values())
+    qty_short = max(0, total_ordered - total_fulfilled)
     qty_short_pct = round(qty_short / total_ordered * 100, 2) if total_ordered > 0 else 0.0
     return {
         'po_id': po_id,
+        'basis': 'produced' if is_internal else 'buyer_received',
         'total_ordered': total_ordered,
         'total_received': total_received,
         'total_shipped': total_shipped,
+        'total_produced': total_produced,
+        'total_fulfilled': total_fulfilled,
         'qty_short': qty_short,
         'qty_short_pct': qty_short_pct,
-        'is_full': total_ordered > 0 and total_received >= total_ordered,
+        'is_full': total_ordered > 0 and total_fulfilled >= total_ordered,
         'ordered_by_item': ordered_by_item,
         'received_by_item': received_by_item,
         'rate_by_item': rate_by_item,

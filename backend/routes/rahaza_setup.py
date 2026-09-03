@@ -357,7 +357,32 @@ async def seed_sample_data(request: Request):
             "created_by": user.get("email") or user.get("name"),
         })
         out["created"]["orders"] += 1
-        out["messages"].append(f"Order demo '{order_number}' dibuat. Buka 'Order Produksi' → generate Work Order untuk mulai.")
+        # AUDIT 2026-09-03: menu 'Order Produksi' & 'Work Order' sudah tidak ada di Portal
+        # Produksi (engine multi-stage dihapus FASE 4). Order demo langsung dijadikan
+        # PO Internal lewat adapter resmi supaya data contoh muncul di alur yang nyata.
+        try:
+            from routes.production_internal_adapter import create_po_from_order
+            po = await create_po_from_order(order_id, request)
+            out["created"]["production_pos"] = 1
+            out["messages"].append(
+                f"PO Internal demo '{(po or {}).get('po_number', '')}' dibuat dari order "
+                f"'{order_number}'. Buka Produksi Internal → PO Internal untuk mulai alur.")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("seed-sample: konversi order→PO gagal: %s", e)
+            out["messages"].append(
+                f"Order demo '{order_number}' dibuat, tetapi belum jadi PO Internal ({e}). "
+                f"Buat PO lewat Produksi Internal → PO Internal.")
+    else:
+        existing_po = await db.production_pos.find_one(
+            {"source_order_id": existing_order["id"]}, {"_id": 0, "po_number": 1, "status": 1})
+        if existing_po:
+            out["messages"].append(
+                f"PO Internal demo sudah ada: '{existing_po.get('po_number', '')}' "
+                f"(status {existing_po.get('status', '-')}). Buka Produksi Internal → PO Internal.")
+        else:
+            out["messages"].append(
+                f"Order demo '{existing_order.get('order_number', '')}' sudah ada tetapi belum "
+                f"menjadi PO Internal. Buat PO lewat Produksi Internal → PO Internal.")
 
     # ── Update setup state ──
     uid = await _uid_of_user(user)
@@ -372,7 +397,9 @@ async def seed_sample_data(request: Request):
         upsert=True,
     )
 
-    out["message"] = "Sample data berhasil diseed. Silakan lanjutkan eksplorasi menu Produksi."
+    out["message"] = ("Sample data sudah lengkap — tidak ada yang ditambahkan. "
+                      if not any(out["created"].values()) else
+                      "Sample data berhasil diseed. ") + "Silakan lanjutkan eksplorasi menu Produksi."
     return out
 
 

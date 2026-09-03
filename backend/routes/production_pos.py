@@ -652,6 +652,7 @@ async def close_po_short(po_id: str, request: Request):
         'qty_short': qty_short,
         'qty_short_pct': f['qty_short_pct'],
         'qty_received_at_close': f['total_received'],
+        'qty_produced_at_close': f.get('total_produced', 0),
         'qty_ordered_at_close': f['total_ordered'],
         'post_completion_adjustment': bool(post_completion),
         'status_before_close_short': po.get('status'),
@@ -684,6 +685,9 @@ async def close_po_short(po_id: str, request: Request):
         'closed_reason': reason,
         'qty_ordered': f['total_ordered'],
         'qty_received': f['total_received'],
+        'qty_produced': f.get('total_produced', 0),
+        'qty_fulfilled': f.get('total_fulfilled', f['total_received']),
+        'basis': f.get('basis'),
         'qty_short': qty_short,
         'qty_short_pct': f['qty_short_pct'],
         'post_completion_adjustment': bool(post_completion),
@@ -1411,6 +1415,7 @@ async def po_quantity_summary(po_id: str, request: Request):
     for bi in _s_bi_all: _s_bi_by_poi.setdefault(bi.get('po_item_id'), []).append(bi)
     _s_ri_by_poi: dict = {}
     for ri in _s_ri_all: _s_ri_by_poi.setdefault(ri.get('po_item_id'), []).append(ri)
+    _is_internal_po = po.get('business_type') == 'internal'
     for item in items:
         ship_items_for_item = _s_vsi_by_poi.get(item['id'], [])
         received = 0; missing = 0
@@ -1426,6 +1431,9 @@ async def po_quantity_summary(po_id: str, request: Request):
             elif ship.get('status') == 'Received':
                 received += si.get('qty_sent', 0)
         total_defect = sum(d.get('defect_qty', 0) for d in _s_def_by_poi.get(item['id'], []))
+        if _is_internal_po and not ship_items_for_item:
+            # PO internal: material diserahkan gudang ke job (bukan kiriman vendor)
+            received = sum(int(ji.get('available_qty', 0) or 0) for ji in _s_ji_by_poi.get(item['id'], []))
         available = max(0, received - total_defect)
         produced = sum(ji.get('produced_qty', 0) for ji in _s_ji_by_poi.get(item['id'], []))
         shipped  = sum(bi.get('qty_shipped', 0) for bi in _s_bi_by_poi.get(item['id'], []))

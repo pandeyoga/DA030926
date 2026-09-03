@@ -272,12 +272,15 @@ export default function WorkOrderModule({ token, userRole, portalId }) {
         <MetricBadge label="Total Missing"   value={totalMissing}  color={totalMissing > 0 ? 'amber' : 'slate'} />
       </div>
 
-      {/* ── Status Quick Stats ───────────────────────────────────────────────── */}
+      {/* ── Status Quick Stats (per baris SKU, dipakai sebagai filter) ────── */}
+      <div className="text-[11px] text-muted-foreground -mb-2" data-testid="wo-status-stats-caption">
+        Status per baris SKU ({allSkus.length} SKU) — klik untuk memfilter
+      </div>
       <div className="grid grid-cols-3 gap-3">
         {[
-          { label: 'Belum Mulai', value: statNotStarted, color: 'bg-muted text-foreground/90', key: 'not-started', dot: 'bg-muted-foreground/50' },
-          { label: 'Sedang Jalan', value: statOngoing, color: 'bg-amber-50 text-amber-700', key: 'ongoing', dot: 'bg-amber-500' },
-          { label: 'Selesai', value: statCompleted, color: 'bg-emerald-50 text-emerald-700', key: 'completed', dot: 'bg-emerald-500' },
+          { label: 'SKU Belum Mulai', value: statNotStarted, color: 'bg-muted text-foreground/90', key: 'not-started', dot: 'bg-muted-foreground/50' },
+          { label: 'SKU Sedang Jalan', value: statOngoing, color: 'bg-amber-50 text-amber-700', key: 'ongoing', dot: 'bg-amber-500' },
+          { label: 'SKU Selesai', value: statCompleted, color: 'bg-emerald-50 text-emerald-700', key: 'completed', dot: 'bg-emerald-500' },
         ].map(s => (
           <button key={s.key}
             onClick={() => setFilterStatus(prev => prev === s.key ? 'all' : s.key)}

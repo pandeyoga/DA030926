@@ -378,8 +378,8 @@ async def _fg_precheck_for_dispatch(db, items_data: list) -> list:
             raise HTTPException(
                 400,
                 f"Stok FG {sku} tidak cukup untuk dikirim: butuh {qty} pcs, tersedia "
-                f"{have:g} pcs. Selesaikan QC penerimaan dari CMT dulu, atau perbaiki "
-                f"stok lewat Stock Opname.")
+                f"{have:g} pcs. Selesaikan scan-in gudang untuk hasil produksi / QC "
+                f"penerimaan dari CMT dulu, atau perbaiki stok lewat Stock Opname.")
     return warnings
 
 
@@ -489,10 +489,11 @@ async def buyer_dispatch_capacity(request: Request):
         'totals': {
             'good_from_cmt': sum(r['good_from_cmt'] for r in rows),
             'reworked_ok': sum(r['reworked_ok'] for r in rows),
+            'internal_produced': sum(r['internal_produced'] for r in rows),
             'dispatched': sum(r['dispatched'] for r in rows),
             'shippable': sum(r['shippable'] for r in rows),
         },
-        'formula': 'sisa bisa kirim = lolos QC + hasil permak − sudah dikirim',
+        'formula': 'sisa bisa kirim = lolos QC + hasil permak + hasil produksi internal − sudah dikirim',
     }
 
 
@@ -766,6 +767,21 @@ async def create_buyer_shipment(request: Request):
     from core.cmt_override import resolve_override, stamp as ov_stamp, effective_vendor_id
     _ov = await resolve_override(request, user, db)
     receiver_type = _resolve_receiver_type(body, user, _ov)
+    items_data = body.get('items', [])
+
+    # ─── PHASE D — resolve PO(s) from items (consolidated multi-PO buyer SJ) ──
+    # A DA→buyer surat jalan may carry items from MULTIPLE POs of the SAME buyer.
+    # Resolve per-item PO; assert single buyer. For CMT→DA declarations this stays
+    # single-PO (vendors declare against one PO / job).
+    po_res = await _resolve_pos_for_items(db, items_data, body.get('po_id'), receiver_type)
+    po = po_res['primary_po']                 # single PO (or None when consolidated)
+    po_ids = po_res['po_ids']
+    # PO INTERNAL tidak lewat CMT ⇒ tidak ada cmt_receipts; sumber kirimnya adalah
+    # hasil produksi job internal (pagar C-1 di bawah) + stok FG gudang.
+    internal_dispatch = bool(po_ids) and all(
+        (po_res['po_by_id'].get(p) or {}).get('business_type') == 'internal' for p in po_ids)
+    # ──────────────────────────────────────────────────────────────────────
+
     source_receipt_ids = []
     if receiver_type == RECEIVER_BUYER and not is_vendor(user):
         # DA + dispatch to buyer wajib source_receipt_ids[]. Validate + cap qty.
@@ -776,7 +792,7 @@ async def create_buyer_shipment(request: Request):
         # generic M-1 "minimal 1 pcs" qty guard) so DA dispatch attempts without
         # source receipts always surface the correct, actionable error message
         # (GUIDELINE §12.2 scenario 4c) regardless of whether items[] is empty.
-        if not source_receipt_ids:
+        if not source_receipt_ids and not internal_dispatch:
             raise HTTPException(
                 400,
                 'Buyer shipment dari DA wajib source_receipt_ids[] (mengacu ke '
@@ -787,16 +803,6 @@ async def create_buyer_shipment(request: Request):
 
     vendor_id = await effective_vendor_id(request, user, db, body.get('vendor_id'))
     vendor_doc = await resolve_vendor_doc(db, vendor_id) if vendor_id else None
-    items_data = body.get('items', [])
-
-    # ─── PHASE D — resolve PO(s) from items (consolidated multi-PO buyer SJ) ──
-    # A DA→buyer surat jalan may carry items from MULTIPLE POs of the SAME buyer.
-    # Resolve per-item PO; assert single buyer. For CMT→DA declarations this stays
-    # single-PO (vendors declare against one PO / job).
-    po_res = await _resolve_pos_for_items(db, items_data, body.get('po_id'), receiver_type)
-    po = po_res['primary_po']                 # single PO (or None when consolidated)
-    po_ids = po_res['po_ids']
-    # ──────────────────────────────────────────────────────────────────────
 
     # ═══════════════════════════════════════════════════════════════════════
     # FASE E (2026-08-15) — SEMUA PAGAR DIJALANKAN **SEBELUM** DOKUMEN DITULIS
@@ -852,7 +858,7 @@ async def create_buyer_shipment(request: Request):
         raise HTTPException(400, 'Dispatch harus memiliki minimal 1 pcs barang dikirim')
 
     # ─── PHASE B — source_receipt_ids cap (DA → buyer) ────────────────────
-    if receiver_type == RECEIVER_BUYER and not is_vendor(user):
+    if receiver_type == RECEIVER_BUYER and not is_vendor(user) and (source_receipt_ids or not internal_dispatch):
         # Validate source_receipt_ids exist, are Approved, and cap qty per SKU.
         await _validate_source_receipts_cap(db, source_receipt_ids, items_data, user)
     # ──────────────────────────────────────────────────────────────────────
@@ -995,12 +1001,24 @@ async def create_buyer_shipment(request: Request):
         # can be computed per-PO even inside a consolidated multi-PO surat jalan.
         _it_po_id = po_res['poitem_to_po'].get(item.get('po_item_id')) or po_res['primary_po_id'] or body.get('po_id')
         _it_po_number = (po_res['po_by_id'].get(_it_po_id) or {}).get('po_number', '') if _it_po_id else ''
+        _job_item_id = item.get('job_item_id')
+        _job_id_line = item.get('job_id') or job_id
+        if not _job_item_id and item.get('po_item_id'):
+            # Layar mengirim baris berbasis po_item; isi job_item_id supaya agregasi
+            # "dikirim/diterima" per job (production_execution) tetap terisi (iterasi 103).
+            _jis = await db.production_job_items.find(
+                {'po_item_id': item['po_item_id']}, {'_id': 0, 'id': 1, 'job_id': 1, 'produced_qty': 1}
+            ).sort('created_at', 1).to_list(None)
+            if _jis:
+                _best = max(_jis, key=lambda j: int(j.get('produced_qty') or 0))
+                _job_item_id = _best['id']
+                _job_id_line = _job_id_line or _best.get('job_id')
         si = {
             'id': new_id(), 'shipment_id': shipment_id,
             'dispatch_seq': dispatch_seq, 'dispatch_date': dispatch_date,
             'po_id': _it_po_id, 'po_number': _it_po_number,   # Phase D denormalization
-            'po_item_id': item.get('po_item_id'), 'job_item_id': item.get('job_item_id'),
-            'job_id': item.get('job_id') or job_id,
+            'po_item_id': item.get('po_item_id'), 'job_item_id': _job_item_id,
+            'job_id': _job_id_line,
             'product_name': (po_item or {}).get('product_name', item.get('product_name', '')),
             'serial_number': (po_item or {}).get('serial_number', item.get('serial_number', '')),
             'size': (po_item or {}).get('size', item.get('size', '')),

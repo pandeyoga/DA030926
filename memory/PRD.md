@@ -170,6 +170,30 @@ See `/app/memory/test_credentials.md` (admin@garment.com / Admin@123).
   "mutasi <tanggal>" / "belum tertaut bank"; tombol hapus hilang bila tertaut. Diuji iteration_101 (17/17 + UI).
 - Data uji: sesi rekon 2026-08 BCA 1-131 (a6f8da0f…) dengan 3 mutasi; T1 tertaut ke STL-TEST-001.
 
+### 2026-09-03 — Audit Portal Produksi iterasi 103: dispatch PO INTERNAL ke buyer + rekonsiliasi angka
+- **Blocker iter-102 tertutup**: PO `business_type='internal'` kini bisa dikirim ke buyer. `core/dispatch_capacity.py`
+  menambah sumber `internal_produced` (Σ `production_job_items.produced_qty` untuk PO internal; `source='internal'`) →
+  `shippable = lolos QC + permak + hasil produksi internal − dikirim`. `POST /api/buyer-shipments` melewati kewajiban
+  `source_receipt_ids` bila SEMUA PO di surat jalan internal (`internal_dispatch`); pagar C-1 (qty ≤ produced) & stok FG
+  gudang tetap berlaku. PO maklon tidak berubah (tanpa receipt → 400).
+- `buyer_shipment_items.job_item_id` kini diisi otomatis dari `production_job_items` (lookup `po_item_id`, pilih yang
+  produced terbesar) supaya agregasi "dikirim/diterima" per job di `/api/production-tracking` & Pusat Kendali terisi.
+  Backfill dokumen lama: `scripts/backfill_buyer_shipment_job_item.py`.
+- `compute_po_fulfillment` PO internal: `basis='produced'`, `total_produced`, `total_fulfilled=max(received, produced)`,
+  `qty_short = ordered − fulfilled`. close-short mengembalikan `qty_produced/qty_fulfilled/basis`.
+  `quantity-summary` PO internal: `received_qty/available_qty` dari `production_job_items.available_qty`.
+- Pusat Kendali: `all_active_wos` + tab **Semua WO** + KPI **Tanpa Deadline** (Active WOs = on_track+at_risk+overdue+unknown).
+- `stage-summary`: tahap dikenali dari `process_type` lalu nama (`STAGE_KEYWORDS`), bukan posisi urutan; respons memuat
+  `by_process[]`; event pada proses Rework/Revisi TIDAK dihitung sewing_output.
+- `seed-sample` idempoten memberi pesan eksplisit "PO Internal demo sudah ada". Production Jobs: kartu status berlabel per SKU.
+- UI Serah Terima FG: PO internal → panel `internal-dispatch-info` (tanpa pemilih CMT Receipt), kolom "Diproduksi",
+  badge "BELUM PRODUKSI"; tab Kekurangan Kirim kolom "Siap Kirim" berlabel sumber (produksi/QC). `data-testid`
+  pemilih PO: `buyer-shipment-po-select`.
+- Keputusan produk: daftar Kekurangan Kirim hanya memuat item yang sudah punya barang (produced/diterima > 0) atau sudah
+  pernah dikirim — PO internal yang belum berproduksi tidak dimasukkan.
+- `NotificationBell` → `/api/notifications/categorized` diverifikasi 200 (temuan skrip kontrak = false positive).
+- Diuji iteration_103: backend 13/13 + iter102 12/12 (termasuk test_11 buyer shipment yang dulu gagal), UI F1–F4 + regresi 8 modul.
+
 ## Session log — Fase 2 FIX: State machine enforcement + verifikasi RBAC live (Feb 2026)
 Temuan verifikasi independen user: PO Draft bisa langsung Closed via /status (200).
 - **Keputusan: BUG-FIX (kategori C-1..M-3), bukan port** — referensi sommerville-adopt sendiri hanya

@@ -217,9 +217,11 @@ export default function ProductionControlTowerModule({ token, onNavigate }) {
   }, [autoRefresh, fetchData]);
 
   const handleWOClick = (wo) => {
-    // Deep-link to WO detail or maklon 360 if maklon
     if (wo.maklon_po_id && onNavigate) {
       onNavigate('maklon-po-360', { po_id: wo.maklon_po_id });
+    } else if (onNavigate) {
+      // WO di Pusat Kendali = job produksi internal → buka daftar Production Jobs
+      onNavigate('prod-work-orders', { job_id: wo.id, po_id: wo.po_id, search: wo.wo_number });
     } else {
       toast.info(`WO ${wo.wo_number} — drill-down belum tersedia`);
     }
@@ -249,7 +251,10 @@ export default function ProductionControlTowerModule({ token, onNavigate }) {
   }
 
   const k = data.kpis || {};
-  const woTabData = woTab === 'overdue' ? (data.overdue_wos || []) : (data.at_risk_wos || []);
+  const woTabData = woTab === 'overdue' ? (data.overdue_wos || [])
+    : woTab === 'at_risk' ? (data.at_risk_wos || [])
+    : (data.all_active_wos || []);
+  const woEmptyLabel = woTab === 'overdue' ? 'WO yang overdue' : woTab === 'at_risk' ? 'WO yang at-risk' : 'WO aktif';
 
   return (
     <div className="space-y-6">
@@ -276,12 +281,13 @@ export default function ProductionControlTowerModule({ token, onNavigate }) {
       />
 
       {/* KPI Strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
         <KPICell label="Active WOs" value={fmtNum(k.active_wos)} icon={Activity} tone="violet" big />
         <KPICell label="Completed Today" value={fmtNum(k.today_completed_wos)} icon={CheckCircle2} tone="green" big />
         <KPICell label="On Track" value={fmtNum(k.on_track)} icon={CheckCircle2} tone="green" />
         <KPICell label="At Risk" value={fmtNum(k.at_risk)} icon={AlertTriangle} tone="amber" />
         <KPICell label="OVERDUE" value={fmtNum(k.overdue)} icon={AlertCircle} tone="red" big />
+        <KPICell label="Tanpa Deadline" value={fmtNum(k.unknown_deadline)} icon={Clock} tone="slate" />
         <KPICell label="CMT Pending QC" value={fmtNum(k.cmt_pending_review)} icon={Truck} tone="blue" />
       </div>
 
@@ -382,12 +388,15 @@ export default function ProductionControlTowerModule({ token, onNavigate }) {
             <TabsTrigger value="at_risk" data-testid="pct-tab-at-risk" className="data-[state=active]:bg-amber-600 data-[state=active]:text-foreground">
               <AlertTriangle className="w-3 h-3 mr-1" /> At Risk ({k.at_risk || 0})
             </TabsTrigger>
+            <TabsTrigger value="all" data-testid="pct-tab-all" className="data-[state=active]:bg-violet-600 data-[state=active]:text-foreground">
+              <Activity className="w-3 h-3 mr-1" /> Semua WO ({k.active_wos || 0})
+            </TabsTrigger>
           </TabsList>
         </Tabs>
         {woTabData.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-32 text-muted-foreground/60 gap-2">
             <CheckCircle2 className="w-10 h-10 opacity-30" />
-            <p className="text-sm">Tidak ada {woTab === 'overdue' ? 'WO yang overdue' : 'WO yang at-risk'} 🎉</p>
+            <p className="text-sm">Tidak ada {woEmptyLabel}</p>
           </div>
         ) : (
           <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">

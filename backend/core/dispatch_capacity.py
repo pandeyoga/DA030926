@@ -85,11 +85,57 @@ def _blank(key: str) -> dict:
         'good_from_cmt': 0,
         'reject_open': 0,
         'reworked_ok': 0,
+        'internal_produced': 0,
+        'source': 'cmt',
         'dispatched': 0,
         'shippable': 0,
         'fg_stock': None,
         'receipt_ids': [],
     }
+
+
+async def _apply_internal_produced(db, rows: dict, *, seed_all: bool = False,
+                                   po_id: str = '') -> None:
+    """Hasil PRODUKSI INTERNAL (`production_job_items.produced_qty`) sebagai sumber kirim.
+
+    PO `business_type='internal'` tidak pernah lewat CMT ⇒ tidak ada `cmt_receipt_lines`.
+    Tanpa ini kapasitas kirimnya selalu 0 (audit iteration_102). Stok FG gudang tetap
+    pagar terakhir (`_fg_precheck_for_dispatch`).
+    `seed_all=True` menambahkan baris untuk semua item PO internal yang sudah berproduksi
+    (dipakai daftar kekurangan kirim); selain itu hanya melengkapi baris yang sudah ada.
+    """
+    proj = {'_id': 0, 'id': 1, 'po_id': 1}
+    if seed_all:
+        q = {'business_type': 'internal'}
+        if po_id:
+            q['id'] = po_id
+        po_ids = await db.production_pos.distinct('id', q)
+        poi_docs = await db.po_items.find({'po_id': {'$in': po_ids}}, proj).to_list(None) if po_ids else []
+    else:
+        poi_ids = [r['po_item_id'] for r in rows.values() if r['po_item_id']]
+        if not poi_ids:
+            return
+        poi_docs = await db.po_items.find({'id': {'$in': poi_ids}}, proj).to_list(None)
+        po_ids = list({d.get('po_id') for d in poi_docs if d.get('po_id')})
+        internal = set(await db.production_pos.distinct(
+            'id', {'id': {'$in': po_ids}, 'business_type': 'internal'})) if po_ids else set()
+        poi_docs = [d for d in poi_docs if d.get('po_id') in internal]
+    target = [d['id'] for d in poi_docs]
+    if not target:
+        return
+    ji_q = {'po_item_id': {'$in': target}}
+    if seed_all:
+        ji_q['produced_qty'] = {'$gt': 0}
+    async for ji in db.production_job_items.find(ji_q, {'_id': 0}):
+        k = line_key(ji.get('po_item_id'), ji.get('sku'))
+        r = rows.setdefault(k, _blank(k)) if seed_all else rows.get(k)
+        if not r:
+            continue
+        r['internal_produced'] += _i(ji.get('produced_qty'))
+        r['source'] = 'internal'
+        for f in ('sku', 'product_name', 'size', 'color'):
+            if not r[f] and ji.get(f):
+                r[f] = ji[f]
 
 
 async def _rows_from_receipt_lines(db, query: dict) -> dict:
@@ -168,7 +214,7 @@ async def _enrich_po(db, rows: dict) -> None:
     if po_ids:
         async for p in db.production_pos.find(
                 {'id': {'$in': po_ids}},
-                {'_id': 0, 'id': 1, 'po_number': 1, 'customer_name': 1}):
+                {'_id': 0, 'id': 1, 'po_number': 1, 'customer_name': 1, 'business_type': 1}):
             po_meta[p['id']] = p
     by_id = {d['id']: d for d in poi_docs}
     for r in rows.values():
@@ -184,6 +230,7 @@ async def _enrich_po(db, rows: dict) -> None:
         meta = po_meta.get(r['po_id']) or {}
         r['po_number'] = meta.get('po_number', '')
         r['buyer'] = meta.get('customer_name', '')
+        r['business_type'] = meta.get('business_type') or 'internal'
 
 
 async def _enrich_fg_stock(db, rows: dict) -> None:
@@ -225,10 +272,14 @@ async def _enrich_fg_stock(db, rows: dict) -> None:
             r['fg_stock'] = cache[r['sku']]
 
 
+def _shippable(r: dict) -> int:
+    return max(0, r['good_from_cmt'] + r['reworked_ok'] + r['internal_produced'] - r['dispatched'])
+
+
 def _finalize(rows: dict) -> list:
     out = []
     for r in rows.values():
-        r['shippable'] = max(0, r['good_from_cmt'] + r['reworked_ok'] - r['dispatched'])
+        r['shippable'] = _shippable(r)
         r['remaining_vs_order'] = max(0, r['ordered'] - r['dispatched']) if r['ordered'] else 0
         out.append(r)
     out.sort(key=lambda x: (x.get('po_number') or '', x.get('sku') or ''))
@@ -256,6 +307,7 @@ async def by_po_items(db, po_item_ids: list, *, with_fg_stock: bool = False) -> 
     rows = await _rows_from_receipt_lines(db, {'po_item_id': {'$in': ids}})
     for pid in ids:
         rows.setdefault(line_key(pid, ''), _blank(line_key(pid, '')))
+    await _apply_internal_produced(db, rows)
     await _apply_dispatched(db, rows)
     await _enrich_po(db, rows)
     if with_fg_stock:
@@ -276,10 +328,13 @@ async def map_for_validation(db, *, receipt_ids: list, items_data: list) -> dict
     missing = [p for p in extra_pois if line_key(p, '') not in rows]
     if missing:
         rows.update(await _rows_from_receipt_lines(db, {'po_item_id': {'$in': missing}}))
+        for p in missing:
+            rows.setdefault(line_key(p, ''), _blank(line_key(p, '')))
+    await _apply_internal_produced(db, rows)
     await _apply_dispatched(db, rows)
     await _enrich_po(db, rows)
     for r in rows.values():
-        r['shippable'] = max(0, r['good_from_cmt'] + r['reworked_ok'] - r['dispatched'])
+        r['shippable'] = _shippable(r)
     return rows
 
 
@@ -313,6 +368,7 @@ async def outstanding(db, *, buyer: str = '', po_id: str = '',
             for f in ('product_name', 'size', 'color', 'serial_number'):
                 if not r[f] and it.get(f):
                     r[f] = it[f]
+    await _apply_internal_produced(db, rows, seed_all=True, po_id=po_id)
     await _apply_dispatched(db, rows)
     await _enrich_po(db, rows)
     await _enrich_fg_stock(db, rows)

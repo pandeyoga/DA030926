@@ -30,6 +30,49 @@ WO_TERMINAL = ('completed', 'cancelled', 'closed')
 WO_ACTIVE = ('draft', 'released', 'in_progress', 'paused', 'on_hold', 'qc_pending', 'finishing')
 
 
+async def _load_active_wos(db, extra_filter: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """SUMBER DATA Pusat Kendali = `production_jobs` (alur Produksi Internal yang nyata).
+
+    AUDIT 2026-09-03: layar ini dulu membaca `rahaza_work_orders` — koleksi engine
+    multi-stage yang sudah DIHAPUS (FASE 4) dan tidak punya satu pun penulis lagi.
+    Akibatnya Pusat Kendali selalu 0 walau PO/job berjalan. Kini job diperkaya lewat
+    `_enrich_jobs` yang sama dengan Tracking Produksi, lalu dipetakan ke bentuk "WO"
+    yang sudah dipakai layar (wo_number/client_name/qty/qty_produced/deadline/status).
+    """
+    from routes.production_execution import _enrich_jobs
+    from core.production_job_lifecycle import JOB_CLOSED_STATUSES
+    q: Dict[str, Any] = {'parent_job_id': {'$in': [None, '']}, **(extra_filter or {})}
+    jobs = await db.production_jobs.find(q, {'_id': 0}).sort('created_at', -1).to_list(2000)
+    jobs = [j for j in jobs if not j.get('parent_job_id')]
+    enriched = await _enrich_jobs(db, jobs)
+    po_ids = list({j.get('po_id') for j in enriched if j.get('po_id')})
+    pos = await db.production_pos.find({'id': {'$in': po_ids}}, {'_id': 0, 'id': 1, 'deadline': 1,
+                                                                'delivery_deadline': 1, 'status': 1}).to_list(None) if po_ids else []
+    po_map = {p['id']: p for p in pos}
+    out = []
+    for j in enriched:
+        raw_status = str(j.get('status') or 'Open')
+        closed = raw_status in JOB_CLOSED_STATUSES or raw_status.lower() in WO_TERMINAL
+        po = po_map.get(j.get('po_id') or '', {})
+        out.append({
+            'id': j.get('id'),
+            'wo_number': j.get('job_number') or j.get('id'),
+            'po_id': j.get('po_id'),
+            'po_number': j.get('po_number'),
+            'client_name': j.get('vendor_name') or 'Produksi Internal',
+            'source': 'internal' if (j.get('business_type') or 'internal') == 'internal' else 'maklon',
+            'status': 'completed' if closed else ('in_progress' if (j.get('total_produced') or 0) > 0 else 'released'),
+            'raw_status': raw_status,
+            'qty': j.get('total_available') or j.get('total_ordered') or 0,
+            'qty_produced': j.get('total_produced') or 0,
+            'qty_shipped': j.get('total_shipped_to_buyer') or 0,
+            'deadline': j.get('deadline') or j.get('delivery_deadline') or po.get('deadline') or po.get('delivery_deadline'),
+            'completed_at': j.get('completed_at') or j.get('updated_at'),
+            'created_at': j.get('created_at'),
+        })
+    return out
+
+
 def _today_iso() -> str:
     return date.today().isoformat()
 
@@ -111,11 +154,9 @@ async def control_tower(
     today_iso = today.isoformat()
     win_start = (today - timedelta(days=days_window)).isoformat()
 
-    # ── Active Work Orders ──────────────────────────────────────────────────
-    active_wos = await db.rahaza_work_orders.find(
-        {'status': {'$in': list(WO_ACTIVE)}},
-        {'_id': 0}
-    ).to_list(length=2000)
+    # ── Active Work Orders (= production_jobs induk yang belum selesai) ─────
+    all_wos = await _load_active_wos(db)
+    active_wos = [w for w in all_wos if w['status'] not in WO_TERMINAL]
     total_active = len(active_wos)
 
     status_count: Dict[str, int] = {}
@@ -144,15 +185,12 @@ async def control_tower(
             'risk_status': risk,
         })
 
-    # ── Today output (WOs completed today) ───────────────────────────────────
-    today_completed_count = await db.rahaza_work_orders.count_documents({
-        'status': 'completed',
-        'completed_at': {'$gte': datetime.fromisoformat(f'{today_iso}T00:00:00')},
-    })
-    last_week_completed = await db.rahaza_work_orders.count_documents({
-        'status': 'completed',
-        'completed_at': {'$gte': datetime.fromisoformat(f'{win_start}T00:00:00')},
-    })
+    # ── Today output (job selesai hari ini / dalam jendela) ─────────────────
+    def _done_since(w, since_iso):
+        d = _parse_date(w.get('completed_at'))
+        return w['status'] in WO_TERMINAL and d is not None and d.isoformat() >= since_iso
+    today_completed_count = sum(1 for w in all_wos if _done_since(w, today_iso))
+    last_week_completed = sum(1 for w in all_wos if _done_since(w, win_start))
 
     # ── Maklon PO progress aggregation ──────────────────────────────────────
     maklon_pos = await db.dewi_maklon_pos.find(
@@ -190,13 +228,8 @@ async def control_tower(
         'created_at': {'$gte': datetime.fromisoformat(f'{today_iso}T00:00:00')}
     })
 
-    # ── Bundles status ──────────────────────────────────────────────────────
-    try:
-        bundle_pending_print = await db.rahaza_bundles.count_documents(
-            {'ticket_printed': {'$ne': True}}
-        )
-    except Exception:
-        bundle_pending_print = 0
+    # ── Bundles: engine bundel sudah dihapus (FASE 4) — tidak ada yang perlu dicetak.
+    bundle_pending_print = 0
 
     # ── Critical alerts ─────────────────────────────────────────────────────
     overdue_list = sorted(
@@ -245,6 +278,12 @@ async def control_tower(
         'wo_status_breakdown': status_count,
         'overdue_wos': serialize_doc(overdue_list),
         'at_risk_wos': serialize_doc(at_risk_list),
+        # Semua WO aktif (termasuk on_track / tanpa deadline) supaya angka Active WOs
+        # bisa direkonsiliasi di layar (audit iteration_102).
+        'all_active_wos': serialize_doc(sorted(
+            enriched_active,
+            key=lambda x: ({'overdue': 0, 'at_risk': 1, 'unknown': 2, 'on_track': 3}.get(x['risk_status'], 9),
+                           x.get('deadline') or '9999'))),
         'maklon_progress': serialize_doc(maklon_progress[:20]),
         'upcoming_deadlines': serialize_doc(upcoming_deadline_pos),
     }
@@ -263,15 +302,17 @@ async def control_tower_wo_list(
     Filtered active WO list for the Control Tower table.
     """
     db = get_db()
-    q: Dict[str, Any] = {'status': {'$in': list(WO_ACTIVE)}}
+    extra: Dict[str, Any] = {}
+    if source in ('internal',):
+        extra['business_type'] = 'internal'
+    elif source in ('maklon', 'toko', 'generic'):
+        extra['business_type'] = {'$ne': 'internal'}
+    wos = [w for w in await _load_active_wos(db, extra) if w['status'] not in WO_TERMINAL]
     if status:
-        q['status'] = status
-    if source:
-        q['source'] = source
-
-    wos = await db.rahaza_work_orders.find(q, {'_id': 0}).sort('deadline', 1).limit(limit).to_list(length=limit)
+        wos = [w for w in wos if w['status'] == status]
+    wos.sort(key=lambda w: (w.get('deadline') is None, str(w.get('deadline') or '')))
     enriched = []
-    for wo in wos:
+    for wo in wos[:limit]:
         item = {
             **wo,
             'progress_pct': _wo_progress_pct(wo),
@@ -288,10 +329,7 @@ async def control_tower_wo_list(
 async def control_tower_alerts(user: dict = Depends(require_auth)):
     """Just the critical alerts (overdue + at_risk + cmt_pending) — for header notification bell."""
     db = get_db()
-    wos = await db.rahaza_work_orders.find(
-        {'status': {'$in': list(WO_ACTIVE)}},
-        {'_id': 0}
-    ).to_list(length=2000)
+    wos = [w for w in await _load_active_wos(db) if w['status'] not in WO_TERMINAL]
     overdue = []
     at_risk = []
     for wo in wos:
